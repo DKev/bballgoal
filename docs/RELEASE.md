@@ -1,0 +1,243 @@
+# 发布指南
+
+**中文** · [English](RELEASE.en.md)
+
+项目发布物分成三类，必须分别验收：
+
+1. **源码预览版**：源码、文档、测试和许可证；
+2. **桌面二进制版**：额外携带 Python、依赖、FFmpeg/FFprobe、模型和 Flutter 应用。
+3. **Android 侧载测试版**：额外携带 ONNX 模型、Rust Runtime 和 ONNX Runtime Android 库。
+
+推送普通 `v*` tag 后，GitHub Actions 会自动构建 macOS Intel、macOS Apple Silicon、Windows x64 和 Android `arm64-v8a` 包；带平台后缀的热修复 tag 只构建该平台，规则见第 4 节。产物上传到对应 GitHub Release。桌面包会携带便携 Python、依赖、FFmpeg/FFprobe 和 `models/bball_model.pt`；Android 包在 CI 中导出 ONNX 模型、编译 Rust Runtime，并下载官方 ONNX Runtime Android（QNN 版）和高通 QNN Runtime 库；预编译 NPU 模型随源码提交。
+
+## 1. 源码公开前检查
+
+### 应包含
+
+- `README.md` 和 `README.en.md`；
+- 入门、FAQ、开发、发布、架构和协议文档；
+- `LICENSE`、`NOTICE`、`CONTRIBUTING.md`、`SECURITY.md`、`CODE_OF_CONDUCT.md`；
+- 依赖、模型和数据授权边界说明；
+- 模型、数据和截图的本地使用说明。
+
+### 不应包含
+
+- 未核验授权的模型/原生运行时二进制；桌面发布所需的 `models/bball_model.pt` 是当前明确的例外，仍应单独核对其授权；
+- 真实比赛视频、导出片段、真实标注和未脱敏截图；
+- `.venv/`、`.tooling/`、`build/`、`dist/` 和个人路径；
+- API key、私钥、真实联系方式或第三方源码 checkout；
+- 只在某台开发机上有效的依赖路径。
+
+执行自动检查：
+
+```bash
+python3 scripts/check_open_source.py
+.venv/bin/python -m pytest -q
+cd apps/desktop
+flutter analyze
+flutter test
+cd ../mobile
+flutter analyze
+flutter test
+cd ../..
+git diff --check
+```
+
+`check_open_source.py` 发现的 error 必须在公开前处理；warning 需要逐项判断并记录。当前源码树的具体阻塞项见 [`OPEN_SOURCE_AUDIT.md`](OPEN_SOURCE_AUDIT.md)。
+
+## 2. 授权核验
+
+| 对象 | 必须确认 |
+|---|---|
+| 源码 | MIT 文件是否随发布物保留 |
+| Python 依赖 | 锁定版本、许可证和 notices |
+| Flutter/Dart 依赖 | `pubspec.lock` 对应版本和 notices |
+| FFmpeg/FFprobe | 编译配置、LGPL/GPL 边界和 notices |
+| 模型代码 | 代码许可证和再分发条件 |
+| 模型权重 | 是否允许公开下载或随包分发 |
+| 训练数据 | 原始和衍生数据的公开处理权 |
+| 演示视频/截图 | 人物、球队、场馆和画面的公开权利 |
+| Android/iOS 原生库 | Rust、ONNX Runtime 和平台 SDK 的分发条件 |
+
+如果模型或训练数据的权利无法证明，只发布源码，并要求使用者自行准备模型。详见 [`MODEL_AND_DATA_LICENSES.md`](MODEL_AND_DATA_LICENSES.md) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+
+## 3. macOS 构建
+
+### 3.1 Debug 构建
+
+```bash
+cd apps/desktop
+flutter pub get
+flutter analyze
+flutter test
+flutter build macos --debug
+```
+
+这只验证 Flutter UI 构建，不代表 Python Engine、模型和 FFmpeg 已嵌入。
+
+### 3.2 准备便携运行时
+
+需要一个包含项目依赖的便携 Python 目录：
+
+```text
+portable-python/
+└── bin/python3
+```
+
+该 Python 应能导入 `cv2`、`numpy`、`ultralytics` 和 `torch`。不要直接复制带有开发机绝对路径或本机动态库引用的 `.venv`。
+
+FFmpeg 和 FFprobe 应使用自包含或静态构建。依赖 Homebrew 的版本只适合本机临时验证，可显式设置 `BHE_ALLOW_EXTERNAL_FFMPEG=1`，但这不代表可分发。
+
+GitHub 临时 macOS 构建机会关闭 Spotlight 索引，以减少制作 DMG 时的资源占用。`scripts/create_macos_dmg.sh` 使用 HFS+，仅对 `Resource busy` 最多尝试 5 次；其他错误立即失败。镜像创建后执行 `hdiutil verify`，验证通过才生成摘要并上传。该策略对应 [GitHub runner 的已报告问题](https://github.com/actions/runner-images/issues/7522)。
+
+### 3.3 准备运行时目录
+
+把已授权模型放在：
+
+```text
+models/bball_model.pt
+```
+
+从仓库根目录运行：
+
+```bash
+BHE_PYTHON_RUNTIME=/path/to/portable-python \
+BHE_FFMPEG=/path/to/static/ffmpeg \
+BHE_FFPROBE=/path/to/static/ffprobe \
+scripts/prepare_macos_runtime.sh dist/macos-runtime
+```
+
+准备脚本会复制 Engine、算法脚本、SQLite schema、模型和视频工具，并运行运行时检查。失败时不要继续构建 `.app`。
+
+### 3.4 构建 Release `.app`
+
+```bash
+BHE_PYTHON_RUNTIME=/path/to/portable-python \
+BHE_FFMPEG=/path/to/static/ffmpeg \
+BHE_FFPROBE=/path/to/static/ffprobe \
+FLUTTER_BIN="$(command -v flutter)" \
+scripts/build_macos_release.sh
+```
+
+脚本默认生成可拖动安装的 `.dmg` 镜像和对应的 SHA-256 校验文件。DMG 内包含 `BHE.app`、`Applications` 快捷方式、使用说明和“一键修复与验证”脚本。打开 dmg 后，把 `BHE.app` 拖到 `Applications`，再双击 `BHE-首次打开修复.command` 即可。发布版本可显式传入版本号：
+
+```bash
+BHE_BUILD_NAME=0.1.0-alpha.2 \
+BHE_BUILD_NUMBER=2 \
+BHE_PYTHON_RUNTIME=/path/to/portable-python \
+BHE_FFMPEG=/path/to/static/ffmpeg \
+BHE_FFPROBE=/path/to/static/ffprobe \
+scripts/build_macos_release.sh
+```
+
+未配置 `BHE_CODESIGN_IDENTITY` 时，脚本只做 ad-hoc 签名（本机临时签名），让嵌入运行时后的 `.app` 保持完整签名封装；这不等于 Apple Developer ID 签名，也不包含公证。该包适合开发者本机或测试机验证，不应直接当作面向公众的正式安装包。首次打开时若被 Gatekeeper 拦截，可在 Finder 中右键应用选择“打开”，或在确认来源可信后移除下载隔离属性。
+
+如果系统仍然拦截已确认来源的应用，可以在终端执行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/BHE.app
+open /Applications/BHE.app
+```
+
+需要签名时：
+
+```bash
+BHE_CODESIGN_IDENTITY="Developer ID Application: Example" \
+BHE_PYTHON_RUNTIME=/path/to/portable-python \
+BHE_FFMPEG=/path/to/static/ffmpeg \
+BHE_FFPROBE=/path/to/static/ffprobe \
+FLUTTER_BIN="$(command -v flutter)" \
+scripts/build_macos_release.sh
+```
+
+`BHE_CODESIGN_IDENTITY` 只触发脚本的签名步骤，不等于已完成 Apple 公证或 Gatekeeper 验证。
+
+### 3.5 干净机器验收
+
+将 `.app` 放到没有源码仓库、Homebrew FFmpeg、开发 `.venv` 和个人模型路径的环境中，至少验证：
+
+1. 应用能找到内置 Engine；
+2. 可以创建项目并导入授权测试视频；
+3. 可以读取元数据、自动或手动设置 ROI；
+4. 标准分析可以完成；
+5. 候选审核、时间调整和导出正常；
+6. 重开项目后状态仍然存在；
+7. 原视频移动后可以重新定位；
+8. 没有向外部网络上传视频或模型数据；
+9. 签名、公证和 Gatekeeper 安装流程通过。
+
+## 4. Windows 实验性发布
+
+准备运行时：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\prepare_windows_runtime.ps1 `
+  -PythonRuntime C:\path\to\portable-python `
+  -Ffmpeg C:\path\to\ffmpeg.exe `
+  -Ffprobe C:\path\to\ffprobe.exe `
+  -OutPath dist\windows-runtime
+```
+
+构建并生成 zip：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows_release.ps1 `
+  -Version 0.1.0-alpha.3 `
+  -PythonRuntime C:\path\to\portable-python `
+  -Ffmpeg C:\path\to\ffmpeg.exe `
+  -Ffprobe C:\path\to\ffprobe.exe `
+  -RuntimeOut dist\windows-runtime `
+  -Zip
+```
+
+脚本会生成 `dist\BHE-windows-x64-v0.1.0-alpha.3.zip` 和对应的 `.sha256` 校验文件。推送 `v*` tag 后，GitHub Actions 会在 Windows x64、macOS Intel 和 macOS Apple Silicon runner 上自动构建并把这些产物上传到 Release；本地没有 Intel Mac 也不影响 Intel 包构建。
+
+Windows 当前属于兼容路径，仍需验证 Flutter 工具链、Python/Torch/OpenCV/Ultralytics、FFmpeg DLL 和安装流程；它不能替代正式安装器、签名和用户验收。
+
+Windows 发布包采用不含 `libx264` 的 LGPL FFmpeg。导出依次尝试硬件编码 `h264_nvenc`（NVIDIA）、`h264_qsv`（Intel）、`h264_amf`（AMD）、`h264_mf`（Media Foundation），再尝试 `libx264`、`libopenh264` 和 `mpeg4`，仅在前一种编码失败时切换；第一个成功的编码器用于同一次导出的后续片段。最后一种使用高质量 MPEG-4 Part 2，仍封装为 MP4，但不保证所有仅支持 H.264 的播放器都能播放。逐片导出与合并失败后的重新编码采用同一规则。代理视频在 Windows 上先用 D3D11VA 显卡解码，失败时回退纯软件解码。打包前运行 `scripts/check_media_pipeline.py --root <runtime>`，实际生成代理、片段和合并视频；检查失败时停止打包。常规 Python CI 也会在 Windows 上用发布包同款 LGPL FFmpeg 执行该检查。
+
+### 自动发布模式与热修复 tag
+
+`.github/workflows/release-packages.yml` 按 tag 名称决定构建范围：
+
+| tag 示例 | 构建与发布范围 | 适用场景 |
+| --- | --- | --- |
+| `v1.2.0`、`v1.2.0-alpha.1` | macOS（Intel、Apple Silicon）、Windows、Android | 常规全平台发布 |
+| `v1.2.0-macos.1` | 仅 macOS 两个架构 | 修复 macOS 打包或运行问题 |
+| `v1.2.0-windows.1` | 仅 Windows x64 | 修复 Windows 打包或运行问题 |
+| `v1.2.0-android.1` | 仅 Android `arm64-v8a` | 修复 Android 打包或运行问题 |
+
+单平台 tag 只会下载、上传并更新该平台的 OSS（对象存储）版本文件和 `latest` 下载别名，不会重新发布其他平台的包。
+
+在 Actions 手动运行 **BHE release packages** 时，可选择 `platform`。手动运行固定从 `refs/tags/<tag>` 检出，适合重试同一个 tag 的构建；已存在 tag 不能代表新代码。代码发生变化时，必须创建并推送新 tag，再由该 tag 触发构建。将 `publish` 关闭可只生成 Actions artifact（构建产物），不改 GitHub Release 或 OSS。独立的 **Upload existing release assets to OSS** 工作流也必须选择 `platform`，默认 `all` 仅用于有意重新发布整套资产。
+
+## 5. 移动端发布边界
+
+Android 当前只发布 `arm64-v8a` APK。Release 工作流会使用调试证书签名，因此文件名会标记为 `debug-signed`：可用于真机侧载测试，但不是 Google Play 可提交的正式签名包。安装前需在 Android 系统中允许该来源安装未知应用。iOS 项目、媒体和导出可构建，但本地分析仍需要 Rust 静态库、ONNX Runtime XCFramework 和 Runner 链接；没有这些产物时不要发布为完整 AI 分析版本。
+
+移动端构建入口见 [`architecture/MOBILE_RUNTIME_V1.md`](architecture/MOBILE_RUNTIME_V1.md) 和 [`../apps/mobile/README.md`](../apps/mobile/README.md)。
+
+## 6. 版本与变更记录
+
+发布前：
+
+1. 更新根目录 [`CHANGELOG.md`](../CHANGELOG.md)；
+2. 在 README 中明确版本和限制；
+3. 协议或数据库变化时更新架构文档和兼容说明；
+4. 算法参数变化时新增带日期的基准记录；
+5. 为源码和二进制分别列出内容，不把模型默认为源码的一部分；
+6. 使用可追溯的 Git commit 或 tag。
+
+没有真实发布物和测试证据时，不要创建“稳定版”或“已支持全部平台”的 Release。
+
+## 7. 当前发布阻塞项
+
+依据 [`OPEN_SOURCE_AUDIT.md`](OPEN_SOURCE_AUDIT.md)，以下事项仍需在正式稳定版前完成：
+
+- 清理或核验当前源码树中的其他模型、原生二进制、研究 checkout 和截图；
+- 逐项生成锁定依赖的许可证 notices；
+- 确认模型权重和训练数据授权；
+- 使用公开授权的演示视频和截图；
+- 在无仓库、无 Homebrew、无开发 `.venv` 的机器上验证；
+- 完成 macOS 签名、公证和 Gatekeeper 验证；
+- 完成 Windows 安装包和移动端目标设备验证。

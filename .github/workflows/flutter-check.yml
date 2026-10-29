@@ -1,0 +1,93 @@
+name: Flutter checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    name: Rust runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust format check
+        run: cargo fmt --manifest-path packages/bhe_runtime/Cargo.toml --check
+      - name: Rust unit tests
+        run: cargo test --manifest-path packages/bhe_runtime/Cargo.toml --features dynamic-onnx
+      - name: Rust dynamic runtime compile check
+        run: cargo check --manifest-path packages/bhe_runtime/Cargo.toml --features dynamic-onnx
+
+  desktop:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.8"
+          channel: stable
+      - run: flutter pub get
+        working-directory: apps/desktop
+      - name: flutter analyze
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set +e
+          flutter analyze 2>&1 | tee "$RUNNER_TEMP/flutter-analyze.log"
+          analyze_status=${PIPESTATUS[0]}
+          if [ "$analyze_status" -ne 0 ]; then
+            grep -E '^[[:space:]]*(error|warning|info) •|Error:' "$RUNNER_TEMP/flutter-analyze.log" \
+              | head -10 \
+              | while IFS= read -r detail; do
+                  echo "::error title=Flutter analyze detail::$detail"
+                done
+          fi
+          exit "$analyze_status"
+      - name: flutter test
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set +e
+          flutter test --reporter expanded 2>&1 | tee "$RUNNER_TEMP/flutter-test.log"
+          test_status=${PIPESTATUS[0]}
+          if [ "$test_status" -ne 0 ]; then
+            grep -m1 -E ' -[1-9][0-9]*:' "$RUNNER_TEMP/flutter-test.log" \
+              | while IFS= read -r failure; do
+                  echo "::error title=Flutter test failure::$failure"
+                done
+            grep -E 'Expected:|Actual:|Which:|The following|══' "$RUNNER_TEMP/flutter-test.log" \
+              | head -9 \
+              | while IFS= read -r detail; do
+                  echo "::error title=Flutter failure detail::$detail"
+                done
+          fi
+          exit "$test_status"
+
+  mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.8"
+          channel: stable
+      - run: flutter pub get
+        working-directory: apps/mobile
+      - name: Prepare placeholder model for structural checks
+        run: |
+          mkdir -p apps/mobile/assets/models
+          printf 'CI placeholder; release builds export the validated ONNX model.\n' \
+            > apps/mobile/assets/models/bball_model.onnx
+      - name: flutter analyze
+        working-directory: apps/mobile
+        run: flutter analyze .
+      - name: flutter test
+        working-directory: apps/mobile
+        run: flutter test
+      - name: flutter build apk
+        working-directory: apps/mobile
+        run: flutter build apk --debug

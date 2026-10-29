@@ -1,0 +1,1314 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:developer' as developer;
+import 'dart:io';
+
+import 'package:archive/archive_io.dart';
+import 'package:bhe_core/bhe_core.dart';
+import 'package:crypto/crypto.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_player/video_player.dart';
+
+import 'media_bridge.dart';
+import 'native_analysis_engine.dart';
+
+class MobileAppState extends ChangeNotifier {
+  MobileAppState({MobileAnalysisEngine? analysisEngine})
+    : analysisEngine = analysisEngine ?? NativeAnalysisEngine() {
+    unawaited(loadSavedProject());
+    unawaited(_loadPlayerGroups());
+  }
+
+  static const playerGroupsPrefsKey = 'bhe.player_groups';
+
+  final MobileAnalysisEngine analysisEngine;
+  final MobileExportEngine exportEngine = NativeMediaExportEngine();
+
+  ProjectSnapshot project = ProjectSnapshot(
+    id: DateTime.now().millisecondsSinceEpoch.toString(),
+    name: '新项目',
+    video: null,
+  );
+  List<ProjectSnapshot> recentProjects = const [];
+  List<({String name, List<String> players})> playerGroups = const [];
+
+  /// Cover image per project id, taken from a shot frame after analysis.
+  Map<String, String> coverPaths = const {};
+  AnalysisStage stage = AnalysisStage.idle;
+  double progress = 0;
+  String progressMessage = '';
+  int? processedFrames;
+  int? totalFrames;
+  Duration? eta;
+  String? errorMessage;
+  bool loading = true;
+  bool preparingVideo = false;
+  String preparingVideoMessage = '';
+  bool analysing = false;
+  bool exporting = false;
+  bool exportCancelled = false;
+  List<String> exportedPaths = const [];
+  Future<void> _saveChain = Future<void>.value();
+  int _analysisGeneration = 0;
+  int _videoPreparationGeneration = 0;
+  DateTime? analysisStartedAt;
+
+  bool get hasVideo => project.video != null;
+  bool get sourceVideoExists =>
+      project.video != null && File(project.video!.path).existsSync();
+  Duration get analysisElapsed => analysisStartedAt == null
+      ? Duration.zero
+      : DateTime.now().difference(analysisStartedAt!);
+
+  Future<Directory> _dataDirectory() async {
+    final root = await getApplicationDocumentsDirectory();
+    final directory = Directory('${root.path}/BHE Mobile');
+    await directory.create(recursive: true);
+    return directory;
+  }
+
+  Future<Directory> _projectsDirectory() async {
+    final directory = Directory('${(await _dataDirectory()).path}/projects');
+    await directory.create(recursive: true);
+    return directory;
+  }
+
+  Future<String> _materializeVideoPath(String path, String projectId) async {
+    if (!Platform.isIOS) return path;
+    final source = File(path);
+    final directory = Directory(
+      '${(await _dataDirectory()).path}/videos/$projectId',
+    );
+    await directory.create(recursive: true);
+    final extension = path.contains('.')
+        ? path.substring(path.lastIndexOf('.')).toLowerCase()
+        : '.mp4';
+    final target = File('${directory.path}/source$extension');
+    // A project can outlive its iOS container path after a reinstall. In
+    // that case keep the already materialized copy instead of trying to copy
+    // from the stale temporary path.
+    if (!await source.exists()) {
+      final existing = await _existingMaterializedVideo(directory);
+      if (existing != null) return existing.path;
+      return target.path;
+    }
+    if (source.path != target.path) {
+      if (await target.exists()) await target.delete();
+      await source.copy(target.path);
+    }
+    await for (final entry in directory.list()) {
+      if (entry.path == target.path) continue;
+      await entry.delete(recursive: true);
+    }
+    return target.path;
+  }
+
+  Future<File?> _existingMaterializedVideo(Directory directory) async {
+    if (!await directory.exists()) return null;
+    await for (final entry in directory.list()) {
+      if (entry is File &&
+          entry.path.split(Platform.pathSeparator).last.startsWith('source.')) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  Future<File> _projectFile(String id) async {
+    final directory = await _projectsDirectory();
+    return File('${directory.path}/$id.json');
+  }
+
+  Future<File> _coverFile(String id) async {
+    final directory = await _projectsDirectory();
+    return File('${directory.path}/${id}_cover.jpg');
+  }
+
+  Future<void> _loadCovers() async {
+    final covers = <String, String>{};
+    for (final item in recentProjects) {
+      final file = await _coverFile(item.id);
+      if (await file.exists()) covers[item.id] = file.path;
+    }
+    coverPaths = covers;
+    notifyListeners();
+    for (final item in recentProjects) {
+      if (!covers.containsKey(item.id)) await _updateCover(item);
+    }
+  }
+
+  /// Uses the first kept shot that passed the rim check, else the first kept
+  /// shot, else the first candidate.
+  Future<void> _updateCover(ProjectSnapshot snapshot) async {
+    final video = snapshot.video;
+    if (video == null || snapshot.candidates.isEmpty) return;
+    final candidates = [...snapshot.candidates]
+      ..sort((a, b) => a.eventMs.compareTo(b.eventMs));
+    final kept = candidates
+        .where((item) => item.selection == CandidateSelection.included)
+        .toList();
+    final cover = kept.firstWhere(
+      (item) => item.rimCheckStatus == 'made',
+      orElse: () => kept.isEmpty ? candidates.first : kept.first,
+    );
+    final file = await _coverFile(snapshot.id);
+    final saved = await analysisEngine.extractCover(
+      videoPath: video.path,
+      timeMs: cover.eventMs,
+      outputPath: file.path,
+    );
+    if (!saved) return;
+    await FileImage(file).evict();
+    coverPaths = {...coverPaths, snapshot.id: file.path};
+    notifyListeners();
+  }
+
+  Future<String> _sha256(File file) async {
+    const sampleSize = 1024 * 1024;
+    final handle = await file.open();
+    try {
+      final length = await handle.length();
+      final first = await handle.read(
+        length < sampleSize ? length : sampleSize,
+      );
+      if (length > sampleSize) await handle.setPosition(length - sampleSize);
+      final last = length > sampleSize
+          ? await handle.read(sampleSize)
+          : const <int>[];
+      return sha256.convert([
+        ...first,
+        ...last,
+        ...utf8.encode('$length'),
+      ]).toString();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  Future<bool> _matchesProjectVideo() async {
+    final expected = project.video;
+    if (expected == null) return false;
+    developer.log(
+      'video validation started: ${expected.path}',
+      name: 'BHE-Analysis',
+    );
+    final file = File(expected.path);
+    if (!await file.exists()) return false;
+    final controller = VideoPlayerController.file(file);
+    try {
+      await controller.initialize();
+      developer.log('video initialized', name: 'BHE-Analysis');
+      final actual = controller.value;
+      if (actual.size.width.round() != expected.width ||
+          actual.size.height.round() != expected.height ||
+          (actual.duration.inMilliseconds - expected.durationMs).abs() > 1500) {
+        return false;
+      }
+      if (expected.sha256 != null) {
+        developer.log('video hash validation started', name: 'BHE-Analysis');
+        if (await _sha256(file) != expected.sha256) return false;
+      }
+      developer.log('video validation succeeded', name: 'BHE-Analysis');
+      return true;
+    } on Object {
+      return false;
+    } finally {
+      await controller.dispose();
+    }
+  }
+
+  Future<void> _validateImportedVideoIfPresent() async {
+    if (project.video == null) {
+      errorMessage = '项目已打开，请重新选择原视频后继续。';
+      return;
+    }
+    final video = project.video!;
+    final directory = Directory(
+      '${(await _dataDirectory()).path}/videos/${project.id}',
+    );
+    final existing = await _existingMaterializedVideo(directory);
+    final persistentPath =
+        existing?.path ?? await _materializeVideoPath(video.path, project.id);
+    if (!await File(persistentPath).exists()) {
+      errorMessage = '项目已打开，请重新选择原视频后继续。';
+      return;
+    }
+    if (persistentPath != video.path) {
+      project = project.copyWith(
+        video: VideoInfo(
+          path: persistentPath,
+          name: video.name,
+          sizeBytes: video.sizeBytes,
+          durationMs: video.durationMs,
+          width: video.width,
+          height: video.height,
+          sha256: video.sha256,
+        ),
+      );
+      await _queueSave();
+    }
+    if (!await _matchesProjectVideo()) {
+      errorMessage = '项目已打开，但当前原视频与项目记录不一致，请重新选择原视频。';
+    }
+  }
+
+  Future<void> loadSavedProject() async {
+    try {
+      final directory = await _dataDirectory();
+      final indexFile = File('${directory.path}/project_index.json');
+      final legacyFile = File('${directory.path}/project.bhe.json');
+      if (await indexFile.exists()) {
+        final ids =
+            (jsonDecode(await indexFile.readAsString()) as List?)
+                ?.whereType<String>()
+                .toSet()
+                .toList() ??
+            const <String>[];
+        final loadedProjects = <ProjectSnapshot>[];
+        for (final id in ids) {
+          final file = await _projectFile(id);
+          if (!await file.exists()) continue;
+          try {
+            loadedProjects.add(
+              const ProjectPackageCodec().decode(await file.readAsString()),
+            );
+          } on Object catch (error, stack) {
+            developer.log(
+              'skipping invalid project $id: $error',
+              name: 'BHE-Project',
+              error: error,
+              stackTrace: stack,
+            );
+          }
+        }
+        recentProjects = loadedProjects;
+        if (recentProjects.isNotEmpty) project = recentProjects.first;
+        await _persistProjects();
+        unawaited(_loadCovers());
+      } else if (await legacyFile.exists()) {
+        project = const ProjectPackageCodec().decode(
+          await legacyFile.readAsString(),
+        );
+        recentProjects = [project];
+        await _persistProjects();
+      }
+      if (project.video != null) await _validateImportedVideoIfPresent();
+      if (project.lastAnalysisStatus == 'running') {
+        unawaited(_recoverRunningAnalysis());
+      }
+    } on Object catch (error) {
+      errorMessage = '读取本地项目失败：$error';
+    } finally {
+      loading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _recoverRunningAnalysis() async {
+    var receivedState = false;
+    try {
+      await for (final update in analysisEngine.recoverAnalysis()) {
+        receivedState = true;
+        stage = update.stage;
+        progress = update.progress.clamp(0, 1);
+        progressMessage = update.message;
+        processedFrames = update.processedFrames;
+        totalFrames = update.totalFrames;
+        analysing =
+            update.stage != AnalysisStage.completed &&
+            update.stage != AnalysisStage.cancelled &&
+            update.stage != AnalysisStage.failed;
+        analysisStartedAt ??= DateTime.now();
+        if (update.stage == AnalysisStage.completed) {
+          project = project.copyWith(
+            candidates: update.candidates,
+            lastAnalysisStatus: 'completed',
+            lastAnalysisProgressPercent: 100,
+            lastAnalysisMessage: '分析完成',
+            lastAnalysisAt: DateTime.now(),
+          );
+          analysing = false;
+          analysisStartedAt = null;
+          await _queueSave();
+          unawaited(_updateCover(project));
+        } else if (update.stage == AnalysisStage.cancelled ||
+            update.stage == AnalysisStage.failed) {
+          project = project.copyWith(
+            lastAnalysisStatus: update.stage == AnalysisStage.cancelled
+                ? 'cancelled'
+                : 'failed',
+            lastAnalysisMessage: update.message,
+          );
+          analysing = false;
+          analysisStartedAt = null;
+          await _queueSave();
+        } else {
+          project = project.copyWith(
+            lastAnalysisStatus: 'running',
+            lastAnalysisProgressPercent: (progress * 100).round(),
+            lastAnalysisMessage: update.message,
+          );
+          unawaited(_queueSave());
+        }
+        notifyListeners();
+      }
+      if (!receivedState && project.lastAnalysisStatus == 'running') {
+        project = project.copyWith(
+          lastAnalysisStatus: 'interrupted',
+          lastAnalysisMessage: '未找到仍在运行的原生分析任务，可重新分析。',
+        );
+        await _queueSave();
+        notifyListeners();
+      }
+    } on Object catch (error) {
+      project = project.copyWith(
+        lastAnalysisStatus: 'interrupted',
+        lastAnalysisMessage: '无法恢复原生分析任务：$error',
+      );
+      analysing = false;
+      analysisStartedAt = null;
+      unawaited(_queueSave());
+      notifyListeners();
+    }
+  }
+
+  Future<void> _writeProject(ProjectSnapshot snapshot) async {
+    final file = await _projectFile(snapshot.id);
+    await file.writeAsString(const ProjectPackageCodec().encode(snapshot));
+    recentProjects = [
+      snapshot,
+      ...recentProjects.where((item) => item.id != snapshot.id),
+    ].take(12).toList();
+    await _persistProjects();
+  }
+
+  Future<void> _persistProjects() async {
+    final directory = await _dataDirectory();
+    final indexFile = File('${directory.path}/project_index.json');
+    await indexFile.writeAsString(
+      jsonEncode(recentProjects.map((item) => item.id).toList()),
+    );
+  }
+
+  Future<void> openProject(String id) async {
+    if (analysing) await cancelAnalysis();
+    _invalidateVideoPreparation();
+    await _saveChain;
+    final file = await _projectFile(id);
+    if (!await file.exists()) return;
+    project = const ProjectPackageCodec().decode(await file.readAsString());
+    _resetTransientState();
+    errorMessage = null;
+    exportedPaths = const [];
+    await _validateImportedVideoIfPresent();
+    recentProjects = [
+      project,
+      ...recentProjects.where((item) => item.id != project.id),
+    ];
+    await _persistProjects();
+    notifyListeners();
+  }
+
+  Future<void> createNewProject() async {
+    if (analysing) await cancelAnalysis();
+    _invalidateVideoPreparation();
+    if (project.video != null) await _queueSave();
+    project = _newProject();
+    _resetTransientState();
+    notifyListeners();
+  }
+
+  ProjectSnapshot _newProject() =>
+      ProjectSnapshot(id: _newProjectId(), name: '新项目', video: null);
+
+  String _newProjectId() {
+    var id = DateTime.now().microsecondsSinceEpoch.toString();
+    final usedIds = {project.id, ...recentProjects.map((item) => item.id)};
+    var suffix = 0;
+    while (usedIds.contains(id)) {
+      id = '${DateTime.now().microsecondsSinceEpoch}_${suffix++}';
+    }
+    return id;
+  }
+
+  Future<void> createNewProjectAndPickVideo() async {
+    if (analysing) await cancelAnalysis();
+    _invalidateVideoPreparation();
+    final picked = await _pickVideo();
+    if (picked == null) return;
+    await createNewProject();
+    await _prepareVideo(picked.path, name: picked.name);
+  }
+
+  Future<void> _queueSave() {
+    final snapshot = project;
+    _saveChain = _saveChain.then<void>(
+      (_) => _writeProject(snapshot),
+      onError: (Object error, StackTrace stack) => _writeProject(snapshot),
+    );
+    return _saveChain;
+  }
+
+  Future<void> pickVideo() async {
+    if (analysing) await cancelAnalysis();
+    _invalidateVideoPreparation();
+    final picked = await _pickVideo();
+    if (picked == null) return;
+    await _prepareVideo(picked.path, name: picked.name);
+  }
+
+  Future<({String path, String name})?> _pickVideo() async {
+    final result = await FilePicker.platform.pickFiles(type: FileType.video);
+    final file = result?.files.single;
+    final path = file?.path;
+    if (path == null) return null;
+    final pathName = path.split(Platform.pathSeparator).last;
+    return (
+      path: path,
+      name: file?.name.trim().isNotEmpty == true ? file!.name : pathName,
+    );
+  }
+
+  Future<void> _prepareVideo(String path, {String? name}) async {
+    final projectId = project.id;
+    final preparationGeneration = ++_videoPreparationGeneration;
+    preparingVideo = true;
+    preparingVideoMessage = '正在读取视频信息';
+    errorMessage = null;
+    notifyListeners();
+    VideoPlayerController? controller;
+    try {
+      preparingVideoMessage = '正在保存视频到本机';
+      notifyListeners();
+      final localPath = await _materializeVideoPath(path, projectId);
+      if (!_isCurrentVideoPreparation(preparationGeneration, projectId)) return;
+      final file = File(localPath);
+      final player = VideoPlayerController.file(file);
+      controller = player;
+      await player.initialize();
+      final value = player.value;
+      final sourceName = name?.trim().isNotEmpty == true
+          ? name!.trim()
+          : path.split(Platform.pathSeparator).last;
+      preparingVideoMessage = '正在读取文件大小';
+      notifyListeners();
+      final sizeBytes = await file.length();
+      if (!_isCurrentVideoPreparation(preparationGeneration, projectId)) return;
+      project = project.copyWith(
+        name: sourceName.replaceFirst(RegExp(r'\.[^.]+$'), ''),
+        video: VideoInfo(
+          path: localPath,
+          name: sourceName,
+          sizeBytes: sizeBytes,
+          durationMs: value.duration.inMilliseconds,
+          width: value.size.width.round(),
+          height: value.size.height.round(),
+        ),
+        clearHoopRoi: true,
+        clearRimRoi: true,
+        clearNetRoi: true,
+        candidates: const [],
+        clearLastAnalysis: true,
+      );
+      errorMessage = null;
+      preparingVideoMessage = '正在保存项目';
+      notifyListeners();
+      await _queueSave();
+      if (!_isCurrentVideoPreparation(preparationGeneration, projectId)) {
+        return;
+      }
+      preparingVideoMessage = '正在识别篮筐区域';
+      notifyListeners();
+      try {
+        final suggestion = await analysisEngine.suggestRoi(
+          video: project.video!,
+          startMs: project.settings.startMs,
+          modelSize: project.settings.modelInputSize,
+        );
+        if (!_isCurrentVideoPreparation(preparationGeneration, projectId)) {
+          return;
+        }
+        final rawRoi = suggestion?['roi'];
+        if (rawRoi is Map) {
+          final analysisRoi = Roi.fromJson(
+            rawRoi.map((key, value) => MapEntry(key.toString(), value)),
+          );
+          final rawNet = suggestion?['net_roi'];
+          final rawRim = suggestion?['rim_roi'];
+          final rimRoi = rawRim is Map
+              ? Roi.fromJson(
+                  rawRim.map((key, value) => MapEntry(key.toString(), value)),
+                )
+              : null;
+          final netRoi = rawNet is Map
+              ? Roi.fromJson(
+                  rawNet.map((key, value) => MapEntry(key.toString(), value)),
+                )
+              : rimRoi != null
+              ? netRoiFromRim(analysisRoi, rimRoi)
+              : Roi(
+                  left: analysisRoi.left,
+                  top: (analysisRoi.top + .06).clamp(0, 1),
+                  right: analysisRoi.right,
+                  bottom: (analysisRoi.bottom + .18).clamp(0, 1),
+                );
+          project = project.copyWith(
+            hoopRoi: analysisRoi,
+            rimRoi: rimRoi,
+            netRoi: netRoi,
+          );
+          await _queueSave();
+        }
+      } on Object catch (error, stack) {
+        developer.log(
+          'automatic ROI suggestion failed: $error',
+          name: 'BHE-Project',
+          error: error,
+          stackTrace: stack,
+        );
+      }
+      unawaited(
+        _finishVideoHash(
+          projectId,
+          preparationGeneration,
+          localPath,
+          sizeBytes,
+          value,
+        ),
+      );
+    } on Object catch (error, stack) {
+      developer.log(
+        'video preparation failed: $error',
+        name: 'BHE-Project',
+        error: error,
+        stackTrace: stack,
+      );
+      errorMessage = '无法读取该视频，请换一个视频重试。';
+    } finally {
+      if (preparationGeneration == _videoPreparationGeneration) {
+        preparingVideo = false;
+        preparingVideoMessage = '';
+        notifyListeners();
+      }
+      await controller?.dispose();
+    }
+  }
+
+  bool _isCurrentVideoPreparation(int generation, String projectId) =>
+      generation == _videoPreparationGeneration && project.id == projectId;
+
+  void _invalidateVideoPreparation() {
+    _videoPreparationGeneration++;
+    preparingVideo = false;
+    preparingVideoMessage = '';
+  }
+
+  void _resetTransientState() {
+    stage = AnalysisStage.idle;
+    progress = 0;
+    progressMessage = '';
+    processedFrames = null;
+    totalFrames = null;
+    eta = null;
+    analysing = false;
+    exporting = false;
+    exportedPaths = const [];
+    analysisStartedAt = null;
+  }
+
+  Future<void> _finishVideoHash(
+    String projectId,
+    int preparationGeneration,
+    String path,
+    int sizeBytes,
+    VideoPlayerValue metadata,
+  ) async {
+    final hash = await _sha256(File(path));
+    if (!_isCurrentVideoPreparation(preparationGeneration, projectId) ||
+        project.video?.path != path) {
+      return;
+    }
+    project = project.copyWith(
+      video: VideoInfo(
+        path: path,
+        name: project.video!.name,
+        sizeBytes: sizeBytes,
+        durationMs: metadata.duration.inMilliseconds,
+        width: metadata.size.width.round(),
+        height: metadata.size.height.round(),
+        sha256: hash,
+      ),
+    );
+    await _queueSave();
+    notifyListeners();
+  }
+
+  Future<void> importProject() async {
+    if (analysing) await cancelAnalysis();
+    _invalidateVideoPreparation();
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['bhe', 'json'],
+    );
+    final file = result?.files.single;
+    final path = file?.path;
+    if (path == null) return;
+    try {
+      if (project.video != null) await _queueSave();
+      final file = File(path);
+      final content = path.toLowerCase().endsWith('.bhe')
+          ? _readProjectFromArchive(await file.readAsBytes())
+          : await file.readAsString();
+      final imported = const ProjectPackageCodec().decode(content);
+      final importedId =
+          project.id == imported.id ||
+              recentProjects.any((item) => item.id == imported.id)
+          ? _newProjectId()
+          : imported.id;
+      project = imported.copyWith(id: importedId);
+      _resetTransientState();
+      errorMessage = null;
+      await _validateImportedVideoIfPresent();
+      await _queueSave();
+      notifyListeners();
+    } on Object catch (error) {
+      errorMessage = '项目包无法打开：$error';
+      notifyListeners();
+    }
+  }
+
+  Future<void> relinkVideo() async {
+    if (analysing) await cancelAnalysis();
+    final result = await FilePicker.platform.pickFiles(type: FileType.video);
+    final file = result?.files.single;
+    final path = file?.path;
+    if (path == null) return;
+    final sourceFile = File(path);
+    final controller = VideoPlayerController.file(sourceFile);
+    try {
+      await controller.initialize();
+      final value = controller.value;
+      final previous = project.video;
+      if (previous != null &&
+          (previous.width != value.size.width.round() ||
+              previous.height != value.size.height.round() ||
+              (previous.durationMs - value.duration.inMilliseconds).abs() >
+                  1500)) {
+        errorMessage = '所选视频的分辨率或时长与项目记录不一致，请选择同一段原视频。';
+        notifyListeners();
+        return;
+      }
+      final fileHash = await _sha256(sourceFile);
+      if (previous?.sha256 != null && previous!.sha256 != fileHash) {
+        errorMessage = '所选视频文件与项目记录不一致，请选择原始视频。';
+        notifyListeners();
+        return;
+      }
+      final localPath = await _materializeVideoPath(path, project.id);
+      final localFile = File(localPath);
+      final fallbackName = path.split(Platform.pathSeparator).last;
+      final name = file?.name.trim().isNotEmpty == true
+          ? file!.name
+          : fallbackName;
+      project = project.copyWith(
+        video: VideoInfo(
+          path: localPath,
+          name: name,
+          sizeBytes: await localFile.length(),
+          durationMs: value.duration.inMilliseconds,
+          width: value.size.width.round(),
+          height: value.size.height.round(),
+          sha256: fileHash,
+        ),
+      );
+      errorMessage = null;
+      await _queueSave();
+      notifyListeners();
+    } finally {
+      await controller.dispose();
+    }
+  }
+
+  void updateSettings(AnalysisSettings settings) {
+    project = project.copyWith(settings: settings);
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  void updateRoi(Roi roi) {
+    updateRois(
+      hoop: roi,
+      net: Roi(
+        left: roi.left,
+        top: (roi.top + .06).clamp(0, 1),
+        right: roi.right,
+        bottom: (roi.bottom + .18).clamp(0, 1),
+      ),
+    );
+  }
+
+  void updateRois({required Roi hoop, required Roi net}) {
+    project = project.copyWith(
+      hoopRoi: hoop,
+      // `hoopRoi` is the large ball-search/analysis area. Keep the separately
+      // calibrated physical rim when that broad area is adjusted.
+      netRoi: net,
+    );
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  Future<void> clearProject() async {
+    if (analysing) await cancelAnalysis();
+    _invalidateVideoPreparation();
+    await _saveChain;
+    final deletedId = project.id;
+    stage = AnalysisStage.idle;
+    errorMessage = null;
+    _resetTransientState();
+    final file = await _projectFile(deletedId);
+    if (await file.exists()) await file.delete();
+    final cover = await _coverFile(deletedId);
+    if (await cover.exists()) await cover.delete();
+    coverPaths = {...coverPaths}..remove(deletedId);
+    recentProjects = recentProjects
+        .where((item) => item.id != deletedId)
+        .toList();
+    await _persistProjects();
+    if (recentProjects.isEmpty) {
+      project = _newProject();
+    } else {
+      project = recentProjects.first;
+      exportedPaths = const [];
+      await _validateImportedVideoIfPresent();
+    }
+    final directory = await _dataDirectory();
+    for (final name in ['project.bhe.json', 'project.bhe']) {
+      final legacy = File('${directory.path}/$name');
+      if (await legacy.exists()) await legacy.delete();
+    }
+    for (final name in ['exports', 'package_staging']) {
+      final artifactDirectory = Directory('${directory.path}/$name/$deletedId');
+      if (await artifactDirectory.exists()) {
+        await artifactDirectory.delete(recursive: true);
+      }
+    }
+    final videoDirectory = Directory('${directory.path}/videos/$deletedId');
+    if (await videoDirectory.exists()) {
+      await videoDirectory.delete(recursive: true);
+    }
+    notifyListeners();
+  }
+
+  void toggleCandidate(String id, CandidateSelection selection) {
+    project = project.copyWith(
+      candidates: project.candidates
+          .map(
+            (candidate) => candidate.id == id
+                ? candidate.copyWith(selection: selection, reviewed: true)
+                : candidate,
+          )
+          .toList(),
+    );
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  void addCandidate(Candidate candidate) {
+    final candidates = [...project.candidates, candidate]
+      ..sort((a, b) => a.eventMs.compareTo(b.eventMs));
+    project = project.copyWith(candidates: candidates);
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  void setAllCandidates(CandidateSelection selection) {
+    project = project.copyWith(
+      candidates: project.candidates
+          .map((candidate) => candidate.copyWith(selection: selection))
+          .toList(),
+    );
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  void setCandidatePlayer(String id, String? player) {
+    project = project.copyWith(
+      candidates: project.candidates
+          .map(
+            (candidate) => candidate.id == id
+                ? candidate.copyWith(
+                    player: player,
+                    clearPlayer: player == null,
+                  )
+                : candidate,
+          )
+          .toList(),
+    );
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  void addPlayer(String player) {
+    final normalized = player.trim();
+    if (normalized.isEmpty || project.players.contains(normalized)) return;
+    project = project.copyWith(players: [...project.players, normalized]);
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  void removePlayer(String player) {
+    project = project.copyWith(
+      players: project.players.where((item) => item != player).toList(),
+      candidates: project.candidates
+          .map(
+            (candidate) => candidate.player == player
+                ? candidate.copyWith(clearPlayer: true)
+                : candidate,
+          )
+          .toList(),
+    );
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  Future<void> _loadPlayerGroups() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(playerGroupsPrefsKey);
+      if (raw == null) return;
+      playerGroups = [
+        for (final item in jsonDecode(raw) as List)
+          (
+            name: (item as Map)['name'].toString(),
+            players: [for (final name in item['players'] as List) '$name'],
+          ),
+      ];
+      notifyListeners();
+    } on Object catch (error) {
+      developer.log('player groups unreadable: $error', name: 'BHE-Project');
+    }
+  }
+
+  Future<void> _persistPlayerGroups() async {
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      playerGroupsPrefsKey,
+      jsonEncode([
+        for (final group in playerGroups)
+          {'name': group.name, 'players': group.players},
+      ]),
+    );
+  }
+
+  Future<void> savePlayerGroup(String name) async {
+    playerGroups = [
+      for (final group in playerGroups)
+        if (group.name != name) group,
+      (name: name, players: [...project.players]),
+    ];
+    await _persistPlayerGroups();
+  }
+
+  Future<void> deletePlayerGroup(String name) async {
+    playerGroups = [
+      for (final group in playerGroups)
+        if (group.name != name) group,
+    ];
+    await _persistPlayerGroups();
+  }
+
+  void importPlayers(List<String> players) {
+    final missing = players.where((item) => !project.players.contains(item));
+    if (missing.isEmpty) return;
+    project = project.copyWith(players: [...project.players, ...missing]);
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  Future<void> exportProjectPackage() async {
+    final directory = await _dataDirectory();
+    final staging = Directory(
+      '${directory.path}/package_staging/${project.id}',
+    );
+    if (await staging.exists()) await staging.delete(recursive: true);
+    await staging.create(recursive: true);
+    final projectJson = File('${staging.path}/project.json');
+    await projectJson.writeAsString(
+      const ProjectPackageCodec().encode(project),
+    );
+    final file = File('${directory.path}/${project.id}.bhe');
+    final encoder = ZipFileEncoder()
+      ..create(file.path, level: ZipFileEncoder.store);
+    encoder.addFileSync(projectJson, 'project.json');
+    encoder.closeSync();
+    await staging.delete(recursive: true);
+    await SharePlus.instance.share(ShareParams(files: [XFile(file.path)]));
+  }
+
+  Future<void> exportClips() async {
+    await exportClipsForPlayer(null);
+  }
+
+  Future<void> mergeClips() async {
+    await mergeClipsForPlayer(null);
+  }
+
+  Future<void> exportClipsForPlayer(String? player) async {
+    if (exporting) return;
+    if (!await _matchesProjectVideo()) {
+      errorMessage = '请先重新选择原视频。';
+      notifyListeners();
+      return;
+    }
+    final directory = await _dataDirectory();
+    final candidates = project.candidates
+        .where(
+          (candidate) => candidate.selection == CandidateSelection.included,
+        )
+        .where((candidate) => player == null || candidate.player == player)
+        .toList();
+    if (candidates.isEmpty) {
+      errorMessage = '没有符合条件的保留片段。';
+      notifyListeners();
+      return;
+    }
+    exporting = true;
+    exportCancelled = false;
+    exportedPaths = const [];
+    final stopwatch = Stopwatch()..start();
+    errorMessage = null;
+    try {
+      await for (final update in exportEngine.exportClips(
+        video: project.video!,
+        candidates: candidates,
+        outputDirectory: '${directory.path}/exports/${project.id}',
+      )) {
+        progress = update.progress;
+        progressMessage = update.message;
+        if (update.outputPath != null) {
+          exportedPaths = [...exportedPaths, update.outputPath!];
+        }
+        notifyListeners();
+      }
+      project = project.copyWith(
+        lastExportDurationMs: stopwatch.elapsedMilliseconds,
+      );
+      await _queueSave();
+    } on Object catch (error) {
+      errorMessage = error.toString();
+      notifyListeners();
+    } finally {
+      stopwatch.stop();
+      exporting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> mergeClipsForPlayer(String? player) async {
+    if (exporting) return;
+    if (!await _matchesProjectVideo()) {
+      errorMessage = '请先重新选择原视频。';
+      notifyListeners();
+      return;
+    }
+    final candidates =
+        project.candidates
+            .where(
+              (candidate) => candidate.selection == CandidateSelection.included,
+            )
+            .where((candidate) => player == null || candidate.player == player)
+            .toList()
+          ..sort((a, b) => a.startMs.compareTo(b.startMs));
+    if (candidates.isEmpty) {
+      errorMessage = '没有符合条件的保留片段。';
+      notifyListeners();
+      return;
+    }
+    exporting = true;
+    exportCancelled = false;
+    exportedPaths = const [];
+    final stopwatch = Stopwatch()..start();
+    errorMessage = null;
+    try {
+      final directory = await _dataDirectory();
+      final outputPath =
+          '${directory.path}/exports/${project.id}/${project.id}_merged.mp4';
+      await for (final update in exportEngine.mergeClips(
+        video: project.video!,
+        candidates: candidates,
+        outputPath: outputPath,
+      )) {
+        progress = update.progress;
+        progressMessage = update.message;
+        if (update.outputPath != null) {
+          exportedPaths = [update.outputPath!];
+        }
+        notifyListeners();
+      }
+      project = project.copyWith(
+        lastExportDurationMs: stopwatch.elapsedMilliseconds,
+      );
+      await _queueSave();
+    } on Object catch (error) {
+      errorMessage = error.toString();
+      notifyListeners();
+    } finally {
+      stopwatch.stop();
+      exporting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> cancelExport() async {
+    if (!exporting) return;
+    exportCancelled = true;
+    try {
+      await exportEngine.cancel();
+      progressMessage = '导出已取消';
+    } on Object catch (error) {
+      errorMessage = error.toString();
+    }
+    notifyListeners();
+  }
+
+  Future<void> shareExportedFiles() async {
+    if (exportedPaths.isEmpty) return;
+    await SharePlus.instance.share(
+      ShareParams(files: exportedPaths.map(XFile.new).toList()),
+    );
+  }
+
+  Future<void> saveExportedFiles() async {
+    if (exportedPaths.isEmpty) return;
+    exporting = true;
+    errorMessage = null;
+    try {
+      for (var index = 0; index < exportedPaths.length; index++) {
+        progress = index / exportedPaths.length;
+        progressMessage = '正在保存到相册 ${index + 1}/${exportedPaths.length}';
+        notifyListeners();
+        await exportEngine.saveToLibrary(exportedPaths[index]);
+      }
+      progress = 1;
+      progressMessage = '已保存 ${exportedPaths.length} 个片段到相册';
+    } on Object catch (error) {
+      errorMessage = error.toString();
+    } finally {
+      exporting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> startAnalysis() async {
+    if (analysing) return;
+    if (!hasVideo || project.hoopRoi == null || project.netRoi == null) {
+      errorMessage = '请先选择视频并设置投篮分析区、篮网检测区。';
+      notifyListeners();
+      return;
+    }
+    stage = AnalysisStage.validateInput;
+    progress = 0.01;
+    progressMessage = '正在检查视频';
+    analysing = true;
+    errorMessage = null;
+    project = project.copyWith(candidates: const []);
+    project = project.copyWith(
+      lastAnalysisStatus: 'running',
+      lastAnalysisProgressPercent: 0,
+      lastAnalysisMessage: progressMessage,
+    );
+    final stopwatch = Stopwatch()..start();
+    final generation = ++_analysisGeneration;
+    analysisStartedAt = DateTime.now();
+    notifyListeners();
+    unawaited(_queueSave());
+    try {
+      final videoMatches = await _matchesProjectVideo().timeout(
+        const Duration(seconds: 45),
+        onTimeout: () => false,
+      );
+      if (!videoMatches) {
+        throw const MobileAnalysisException('视频检查未通过或耗时过长，请重新选择可正常播放的原视频。');
+      }
+      if (generation != _analysisGeneration) return;
+      progress = 0.02;
+      progressMessage = '正在准备本地分析';
+      notifyListeners();
+      await for (final update in analysisEngine.analyze(
+        video: project.video!,
+        hoopRoi: project.hoopRoi!,
+        rimRoi: project.rimRoi,
+        netRoi: project.netRoi!,
+        settings: project.settings,
+      )) {
+        if (generation != _analysisGeneration) break;
+        stage = update.stage;
+        progress = update.progress.clamp(0, 1);
+        progressMessage = update.message;
+        processedFrames = update.processedFrames;
+        totalFrames = update.totalFrames;
+        eta = update.eta;
+        project = project.copyWith(candidates: update.candidates);
+        final percent = (progress * 100).round();
+        project = project.copyWith(
+          lastAnalysisStatus: 'running',
+          lastAnalysisProgressPercent: percent,
+          lastAnalysisMessage: update.message,
+        );
+        if (percent == 100 || percent % 5 == 0) unawaited(_queueSave());
+        notifyListeners();
+      }
+      if (generation != _analysisGeneration) return;
+      stopwatch.stop();
+      project = project.copyWith(
+        lastAnalysisDurationMs: stopwatch.elapsedMilliseconds,
+        lastAnalysisAt: DateTime.now(),
+        lastAnalysisStatus: 'completed',
+        lastAnalysisProgressPercent: 100,
+        lastAnalysisMessage: '分析完成',
+      );
+      await _queueSave();
+      unawaited(_updateCover(project));
+    } on Object catch (error) {
+      if (generation != _analysisGeneration) return;
+      stage = AnalysisStage.failed;
+      errorMessage = error.toString();
+      project = project.copyWith(
+        lastAnalysisStatus: 'failed',
+        lastAnalysisMessage: errorMessage,
+      );
+      unawaited(_queueSave());
+      notifyListeners();
+    } finally {
+      stopwatch.stop();
+      if (generation == _analysisGeneration) {
+        analysing = false;
+        analysisStartedAt = null;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> cancelAnalysis() async {
+    if (!analysing) return;
+    _analysisGeneration++;
+    await analysisEngine.cancel();
+    analysing = false;
+    analysisStartedAt = null;
+    stage = AnalysisStage.cancelled;
+    progressMessage = '分析已取消';
+    project = project.copyWith(
+      lastAnalysisStatus: 'cancelled',
+      lastAnalysisMessage: progressMessage,
+    );
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  void updateCandidate(Candidate candidate) {
+    project = project.copyWith(
+      candidates: project.candidates
+          .map((item) => item.id == candidate.id ? candidate : item)
+          .toList(),
+    );
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+
+  /// Applies an event-centered clip range to all or selected candidates.
+  /// Manually edited ranges are preserved unless explicitly overwritten.
+  int applyBatchClipRange({
+    required int beforeSeconds,
+    required int afterSeconds,
+    Iterable<String>? candidateIds,
+    bool overwriteManual = false,
+  }) {
+    final video = project.video;
+    if (video == null) return 0;
+    final ids = candidateIds?.toSet();
+    var updated = 0;
+    final beforeMs = beforeSeconds.clamp(0, 3600) * 1000;
+    final afterMs = afterSeconds.clamp(0, 3600) * 1000;
+    final candidates = project.candidates.map((candidate) {
+      if (ids != null && !ids.contains(candidate.id)) return candidate;
+      if (candidate.rangeEdited && !overwriteManual) return candidate;
+      final start = (candidate.eventMs - beforeMs)
+          .clamp(0, video.durationMs)
+          .toInt();
+      final end = (candidate.eventMs + afterMs)
+          .clamp(0, video.durationMs)
+          .toInt();
+      if (end <= start) return candidate;
+      updated++;
+      return candidate.copyWith(startMs: start, endMs: end, rangeEdited: false);
+    }).toList();
+    if (updated == 0) return 0;
+    project = project.copyWith(candidates: candidates);
+    unawaited(_queueSave());
+    notifyListeners();
+    return updated;
+  }
+
+  void updateCandidateNote(String id, String? note) {
+    project = project.copyWith(
+      candidates: project.candidates
+          .map(
+            (item) => item.id == id
+                ? item.copyWith(
+                    note: note,
+                    clearNote: note == null || note.trim().isEmpty,
+                  )
+                : item,
+          )
+          .toList(),
+    );
+    unawaited(_queueSave());
+    notifyListeners();
+  }
+}
+
+Roi netRoiFromRim(Roi analysisRoi, Roi rimRoi) {
+  final centerX = (rimRoi.left + rimRoi.right) / 2;
+  final rimWidth = (rimRoi.right - rimRoi.left).clamp(0.004, 1.0).toDouble();
+  final rimHeight = (rimRoi.bottom - rimRoi.top).clamp(0.008, 1.0).toDouble();
+  final analysisWidth = analysisRoi.right - analysisRoi.left;
+  final width = (rimWidth * 1.5)
+      .clamp(analysisWidth * 0.08, analysisWidth * 0.34)
+      .toDouble();
+  final left = (centerX - width / 2).clamp(
+    analysisRoi.left,
+    analysisRoi.right - width,
+  );
+  final right = left + width;
+  // The net starts below the physical rim, not at the top edge of the rim
+  // detection box. Using rimRoi.top makes the net overlay appear vertically
+  // flipped and includes the backboard/upper hoop area.
+  final top = rimRoi.bottom
+      .clamp(analysisRoi.top, analysisRoi.bottom)
+      .toDouble();
+  final bottom = analysisRoi.bottom < top + 4.5 * rimHeight
+      ? analysisRoi.bottom
+      : top + 4.5 * rimHeight;
+  return Roi(
+    left: left.clamp(0.0, 1.0).toDouble(),
+    top: top.clamp(0.0, 1.0).toDouble(),
+    right: right.clamp(0.0, 1.0).toDouble(),
+    bottom: bottom.clamp(0.0, 1.0).toDouble(),
+  );
+}
+
+String _readProjectFromArchive(List<int> bytes) {
+  final archive = ZipDecoder().decodeBytes(bytes);
+  final project = archive.files.cast<ArchiveFile?>().firstWhere(
+    (file) => file?.name == 'project.json',
+    orElse: () => null,
+  );
+  if (project == null) throw const FormatException('项目包缺少 project.json');
+  return utf8.decode(project.readBytes() ?? const <int>[]);
+}

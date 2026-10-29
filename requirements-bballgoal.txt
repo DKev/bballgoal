@@ -1,0 +1,5 @@
+# bballgoal 额外依赖（ultralytics 跟踪器需要）
+lap>=0.5.12
+pyobjc-framework-Vision>=10
+pyobjc-framework-Quartz>=10
+boxmot>=25.0

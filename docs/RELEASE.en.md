@@ -1,0 +1,243 @@
+# Release Guide
+
+[中文](RELEASE.md) · **English**
+
+Treat releases as three separate deliverables:
+
+1. **Source preview**: source, documentation, tests, and licenses;
+2. **Desktop binary**: Flutter plus Python, dependencies, FFmpeg/FFprobe, and a model.
+3. **Android sideload test build**: ONNX model, Rust Runtime, and ONNX Runtime Android library.
+
+After a normal `v*` tag is pushed, GitHub Actions builds Intel macOS, Apple Silicon macOS, Windows x64, and Android `arm64-v8a` packages. Platform-suffixed hotfix tags build only that platform; see section 4. Packages are uploaded to the matching GitHub Release. Desktop packages include portable Python, dependencies, FFmpeg/FFprobe, and `models/bball_model.pt`; the Android job exports the ONNX model, compiles the Rust runtime, and downloads the official ONNX Runtime Android (QNN build) and Qualcomm QNN Runtime libraries; the precompiled NPU model is committed with the source.
+
+## 1. Source-publication checklist
+
+### Include
+
+- `README.md` and `README.en.md`;
+- getting-started, FAQ, development, release, architecture, and protocol docs;
+- `LICENSE`, `NOTICE`, `CONTRIBUTING.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md`;
+- dependency, model, and data-rights guidance;
+- local-use instructions for models, data, and screenshots.
+
+### Do not include
+
+- unverified model/native-runtime binaries; `models/bball_model.pt` is an intentional exception required by the desktop release and still needs a separate rights review;
+- real game videos, exported clips, real labels, or unsanitized screenshots;
+- `.venv/`, `.tooling/`, `build/`, `dist/`, or personal paths;
+- API keys, private keys, personal contact details, or third-party source checkouts;
+- dependency paths that only work on one development machine.
+
+Run the checks:
+
+```bash
+python3 scripts/check_open_source.py
+.venv/bin/python -m pytest -q
+cd apps/desktop
+flutter analyze
+flutter test
+cd ../mobile
+flutter analyze
+flutter test
+cd ../..
+git diff --check
+```
+
+Every error from `check_open_source.py` must be fixed before publication. Warnings need an explicit decision and record. See [`OPEN_SOURCE_AUDIT.md`](OPEN_SOURCE_AUDIT.md) for the current tree's blockers.
+
+## 2. Rights review
+
+| Item | Must be confirmed |
+|---|---|
+| Source | MIT file is included in the deliverable |
+| Python dependencies | Locked versions, licenses, and notices |
+| Flutter/Dart dependencies | Versions in `pubspec.lock` and notices |
+| FFmpeg/FFprobe | Build configuration, LGPL/GPL boundary, and notices |
+| Model code | Code license and redistribution terms |
+| Model weights | Whether public download or bundling is allowed |
+| Training data | Public-processing rights for original and derived data |
+| Demo videos/screenshots | Rights for people, teams, venues, and footage |
+| Android/iOS native libraries | Distribution terms for Rust, ONNX Runtime, and platform SDKs |
+
+If model or training-data rights cannot be proven, publish source only and ask users to provide their own model. See [`MODEL_AND_DATA_LICENSES.md`](MODEL_AND_DATA_LICENSES.md) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+## 3. macOS build
+
+### 3.1 Debug build
+
+```bash
+cd apps/desktop
+flutter pub get
+flutter analyze
+flutter test
+flutter build macos --debug
+```
+
+This validates the Flutter UI build only; it does not prove that Python, the Engine, the model, or FFmpeg are embedded.
+
+### 3.2 Prepare a portable runtime
+
+Provide a portable Python directory containing the project dependencies:
+
+```text
+portable-python/
+└── bin/python3
+```
+
+It must import `cv2`, `numpy`, `ultralytics`, and `torch`. Do not copy a developer `.venv` that contains absolute paths or machine-local libraries.
+
+Use a self-contained or static FFmpeg/FFprobe build. Homebrew-dependent binaries are for local testing only; `BHE_ALLOW_EXTERNAL_FFMPEG=1` can be used explicitly for that purpose, but it is not a distribution solution.
+
+Ephemeral GitHub macOS runners disable Spotlight indexing to reduce contention during DMG creation. `scripts/create_macos_dmg.sh` uses HFS+ and attempts `Resource busy` failures at most five times; other errors fail immediately. It runs `hdiutil verify` before checksumming and uploading the image. See the [reported GitHub runner issue](https://github.com/actions/runner-images/issues/7522).
+
+### 3.3 Prepare the runtime directory
+
+Place an authorized model at:
+
+```text
+models/bball_model.pt
+```
+
+From the repository root:
+
+```bash
+BHE_PYTHON_RUNTIME=/path/to/portable-python \
+BHE_FFMPEG=/path/to/static/ffmpeg \
+BHE_FFPROBE=/path/to/static/ffprobe \
+scripts/prepare_macos_runtime.sh dist/macos-runtime
+```
+
+The script copies the Engine, algorithm scripts, SQLite schema, model, and video tools, then runs the runtime check. Do not continue to the app build when it fails.
+
+### 3.4 Build the Release `.app`
+
+```bash
+BHE_PYTHON_RUNTIME=/path/to/portable-python \
+BHE_FFMPEG=/path/to/static/ffmpeg \
+BHE_FFPROBE=/path/to/static/ffprobe \
+FLUTTER_BIN="$(command -v flutter)" \
+scripts/build_macos_release.sh
+```
+
+The script produces a drag-to-Applications `.dmg` image and its SHA-256 checksum by default. The DMG includes `BHE.app`, an `Applications` shortcut, usage instructions, and a one-click repair and verification script. Open the DMG, drag `BHE.app` to `Applications`, then double-click `BHE-首次打开修复.command`. Pass an explicit version when preparing a release build:
+
+```bash
+BHE_BUILD_NAME=0.1.0-alpha.2 \
+BHE_BUILD_NUMBER=2 \
+BHE_PYTHON_RUNTIME=/path/to/portable-python \
+BHE_FFMPEG=/path/to/static/ffmpeg \
+BHE_FFPROBE=/path/to/static/ffprobe \
+scripts/build_macos_release.sh
+```
+
+Without `BHE_CODESIGN_IDENTITY`, the script applies only an ad-hoc signature (a local temporary signature) so the `.app` remains sealed after the bundled runtime is copied in. This is not an Apple Developer ID signature and does not include notarization. Use this package for local or test-machine validation, not as a public stable installer. If Gatekeeper blocks the first launch, use Finder's **Open** action after confirming the package's source, or remove the quarantine attribute only after that review.
+
+If macOS still blocks the app after you have confirmed its source, run:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/BHE.app
+open /Applications/BHE.app
+```
+
+With code signing:
+
+```bash
+BHE_CODESIGN_IDENTITY="Developer ID Application: Example" \
+BHE_PYTHON_RUNTIME=/path/to/portable-python \
+BHE_FFMPEG=/path/to/static/ffmpeg \
+BHE_FFPROBE=/path/to/static/ffprobe \
+FLUTTER_BIN="$(command -v flutter)" \
+scripts/build_macos_release.sh
+```
+
+`BHE_CODESIGN_IDENTITY` only triggers the script's signing step; it does not prove Apple notarization or Gatekeeper validation.
+
+### 3.5 Clean-machine acceptance
+
+Copy the `.app` to an environment without the source repository, Homebrew FFmpeg, the development `.venv`, or personal model paths. Verify at least:
+
+1. the app finds its bundled Engine;
+2. a project can be created and an authorized test video imported;
+3. metadata and automatic/manual ROI setup work;
+4. Standard analysis completes;
+5. review, range adjustment, and export work;
+6. project state survives reopening;
+7. a moved source video can be relinked;
+8. no video or model data is uploaded externally;
+9. signing, notarization, and Gatekeeper installation work.
+
+## 4. Experimental Windows release
+
+Prepare the runtime:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\prepare_windows_runtime.ps1 `
+  -PythonRuntime C:\path\to\portable-python `
+  -Ffmpeg C:\path\to\ffmpeg.exe `
+  -Ffprobe C:\path\to\ffprobe.exe `
+  -OutPath dist\windows-runtime
+```
+
+Build and create a zip:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows_release.ps1 `
+  -Version 0.1.0-alpha.3 `
+  -PythonRuntime C:\path\to\portable-python `
+  -Ffmpeg C:\path\to\ffmpeg.exe `
+  -Ffprobe C:\path\to\ffprobe.exe `
+  -RuntimeOut dist\windows-runtime `
+  -Zip
+```
+
+The script creates `dist\BHE-windows-x64-v0.1.0-alpha.3.zip` and its `.sha256` checksum. Once a `v*` tag is pushed, GitHub Actions builds Windows x64, Intel macOS, and Apple Silicon macOS packages on hosted runners and uploads them to the GitHub Release; an Intel Mac is not needed locally.
+
+Windows remains a compatibility path. Validate the Flutter toolchain, Python/Torch/OpenCV/Ultralytics, FFmpeg DLLs, and installation flow; these scripts are not a formal installer or signing process.
+
+The Windows package uses LGPL FFmpeg without `libx264`. Export tries the hardware encoders `h264_nvenc` (NVIDIA), `h264_qsv` (Intel), `h264_amf` (AMD), and `h264_mf` (Media Foundation), then `libx264`, `libopenh264`, and `mpeg4`, switching only when an encoder fails; the first encoder that works is used for the rest of that export. The last option uses high-quality MPEG-4 Part 2 inside MP4; players that only support H.264 may not play it. Both individual clips and re-encoding after a failed merge use this policy. On Windows the proxy video is decoded with D3D11VA first and falls back to software decoding. Packaging runs `scripts/check_media_pipeline.py --root <runtime>` to generate a real proxy, clips, and merged video, and stops on failure. Regular Python CI also runs this check on Windows using the same LGPL FFmpeg variant as the release package.
+
+### Automated release modes and hotfix tags
+
+`.github/workflows/release-packages.yml` selects the build scope from the tag name:
+
+| Example tag | Build and publish scope | Use case |
+| --- | --- | --- |
+| `v1.2.0`, `v1.2.0-alpha.1` | macOS (Intel and Apple Silicon), Windows, and Android | Normal cross-platform release |
+| `v1.2.0-macos.1` | Both macOS architectures only | Fix a macOS packaging or runtime issue |
+| `v1.2.0-windows.1` | Windows x64 only | Fix a Windows packaging or runtime issue |
+| `v1.2.0-android.1` | Android `arm64-v8a` only | Fix an Android packaging or runtime issue |
+
+A single-platform tag downloads, uploads, and updates only that platform's OSS (object storage) versioned files and `latest` download aliases. It does not republish the other platforms' packages.
+
+When manually running **BHE release packages** in Actions, choose `platform`. The workflow always checks out `refs/tags/<tag>` for a manual run, which is appropriate for retrying that tag's build; an existing tag cannot include new code. After code changes, create and push a new tag so that tag triggers the build. Turn off `publish` to create Actions artifacts only, without changing the GitHub Release or OSS. The separate **Upload existing release assets to OSS** workflow also requires `platform`; use its default `all` only when intentionally republishing the whole asset set.
+
+## 5. Mobile release boundary
+
+Android currently publishes an `arm64-v8a` APK only. The release workflow signs it with the debug certificate, so the filename includes `debug-signed`: it is suitable for sideloaded device testing but not for Google Play submission. Users must allow installation from the relevant unknown source. iOS project, media, and export paths can build, but local analysis still needs the Rust static library, the ONNX Runtime XCFramework, and Runner linking. Do not publish a build without these artifacts as a full AI-analysis release.
+
+See [`architecture/MOBILE_RUNTIME_V1.md`](architecture/MOBILE_RUNTIME_V1.md) and [`../apps/mobile/README.md`](../apps/mobile/README.md) for the mobile build entry points.
+
+## 6. Version and change records
+
+Before a release:
+
+1. Update the root [`CHANGELOG.md`](../CHANGELOG.md).
+2. State the version and limitations in both README files.
+3. Update architecture and compatibility notes for protocol or database changes.
+4. Add a dated benchmark when algorithm parameters change.
+5. List source and binary contents separately; never assume the model is part of the source license.
+6. Use a traceable Git commit or tag.
+
+Do not create a “stable” or “all-platform supported” release without a real artifact and acceptance evidence.
+
+## 7. Current release blockers
+
+According to [`OPEN_SOURCE_AUDIT.md`](OPEN_SOURCE_AUDIT.md), complete the following before calling a release stable:
+
+- remove or verify other models, native binaries, research checkouts, and screenshots in the current source tree;
+- generate notices for every locked dependency;
+- confirm model-weight and training-data rights;
+- replace demo material with publishable videos and screenshots;
+- validate on a machine without the repository, Homebrew, or the development `.venv`;
+- complete macOS signing, notarization, and Gatekeeper validation;
+- complete Windows installer and mobile target-device validation.

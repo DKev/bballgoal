@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>认人 · bballgoal</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #fff; --text: #1d2129; --muted: #6b7280; --line: #e3e5e9;
+  --accent: #2563eb; --ok: #16a34a; --warn: #d97706; --bad: #dc2626;
+  --teamA: #7f1d1d; --teamB: #ca8a04;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111318; --panel: #1b1e25; --text: #e6e8ec; --muted: #9aa1ad; --line: #2c313b; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; background: var(--bg); color: var(--text); }
+header { position: sticky; top: 0; z-index: 20; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; }
+.toprow { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 17px; margin: 0 8px 0 0; }
+.progress { flex: 1; min-width: 160px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.progress > div { height: 100%; background: var(--ok); transition: width .3s; }
+.status { color: var(--muted); font-size: 12px; min-width: 90px; text-align: right; }
+.filters button, .seg button { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.filters button.on, .seg button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.roster { display: flex; gap: 16px; margin-top: 8px; flex-wrap: wrap; }
+.roster .team { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.roster input.teamname { width: 70px; font-weight: 600; border: 1px dashed var(--line); background: transparent; color: var(--text); padding: 2px 4px; border-radius: 4px; }
+.chip { font-size: 12px; padding: 1px 7px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); cursor: pointer; white-space: nowrap; }
+.chip.ok { border-color: var(--ok); }
+.help { color: var(--muted); font-size: 12px; margin-top: 6px; }
+main { padding: 16px; display: grid; gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.card.confirmed { border-color: var(--ok); box-shadow: inset 4px 0 0 var(--ok); }
+.card.dragover { outline: 3px dashed var(--accent); }
+.card .head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.handle { cursor: grab; font-size: 18px; color: var(--muted); user-select: none; padding: 0 2px; }
+.title { font-weight: 700; font-size: 15px; min-width: 64px; }
+.meta { color: var(--muted); font-size: 12px; }
+.ocr { font-size: 12px; color: var(--muted); }
+.ocr b { color: var(--text); }
+.head input.num { width: 56px; } .head input.name { width: 120px; }
+.head input, .head select { font-size: 14px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }
+.confirm { border: 1px solid var(--ok); color: var(--ok); background: transparent; border-radius: 6px; padding: 3px 12px; cursor: pointer; font-weight: 600; }
+.card.confirmed .confirm { background: var(--ok); color: #fff; }
+.warn { color: var(--warn); font-size: 12px; }
+.warn button { font-size: 12px; margin-left: 4px; cursor: pointer; }
+.tracks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.track { position: relative; border: 1px solid var(--line); border-radius: 6px; padding: 3px; background: var(--bg); cursor: grab; }
+.track .imgs { display: flex; gap: 2px; }
+.track img { height: 110px; border-radius: 3px; display: block; }
+.track .cap { font-size: 11px; color: var(--muted); text-align: center; }
+.track .x { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border-radius: 50%; border: none; background: rgba(0,0,0,.55); color: #fff; cursor: pointer; font-size: 13px; line-height: 20px; padding: 0; }
+.track .x:hover { background: var(--bad); }
+.track.small img { height: 70px; }
+.more { align-self: center; border: 1px dashed var(--line); background: transparent; color: var(--muted); border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+#preview { position: fixed; right: 16px; bottom: 16px; z-index: 30; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px; display: none; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+#preview img { max-height: 42vh; max-width: 40vw; display: block; }
+#preview div { font-size: 12px; color: var(--muted); text-align: center; }
+.newzone { border: 2px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center; color: var(--muted); }
+.newzone.dragover { border-color: var(--accent); color: var(--accent); }
+.pool { border-style: dashed; }
+@media (max-width: 640px) { main { padding: 8px; } .track img { height: 84px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="toprow">
+    <h1>认人</h1>
+    <div class="filters" id="filters"></div>
+    <div class="progress"><div id="bar"></div></div>
+    <span id="progressText" class="meta"></span>
+    <button id="undo" class="chip" title="Ctrl+Z">↶ 撤销</button>
+    <span id="status" class="status"></span>
+  </div>
+  <div class="roster" id="roster"></div>
+  <div class="help">每张卡片是一个人。填号码、名字、队，点“确认”。混进来的别人：点截图右上角 × 移到“未归类”，或直接把那段拖到正确的卡片上。两张卡是同一个人：拖左边的 ⠿ 到另一张卡上合并。鼠标停在截图上看周围画面。</div>
+</header>
+<main id="main"></main>
+<div id="preview"><img><div></div></div>
+<script>
+const KINDS = { player: "球员", coach: "教练", ref: "裁判", ignore: "无关的人" };
+let cards, tracks = {}, state, history = [], filter = "todo", expanded = new Set(), saveTimer;
+
+const $ = (s, el = document) => el.querySelector(s);
+const h = (tag, attrs = {}, ...kids) => {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "class") el.className = v;
+    else if (v !== false && v != null) el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat(Infinity)) if (kid != null) el.append(kid.nodeType ? kid : document.createTextNode(kid));
+  return el;
+};
+const fmt = t => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+
+async function load() {
+  const res = await (await fetch("/api/state")).json();
+  cards = res.cards;
+  for (const c of cards.cards) for (const t of c.tracks) tracks[t.id] = t;
+  state = res.people || initialState();
+  // 重新生成卡片后多出来的轨迹放进未归类
+  const known = new Set(state.people.flatMap(p => p.tracks).concat(state.unassigned));
+  for (const id of Object.keys(tracks).map(Number)) if (!known.has(id)) state.unassigned.push(id);
+  render();
+}
+
+function initialState() {
+  return {
+    teams: { A: { name: "A队" }, B: { name: "B队" } },
+    people: cards.cards.map(c => {
+      const m = c.id.match(/^([AB])#(\d+)$/);
+      return {
+        id: c.id, origin: c.id,
+        team: ["A", "B"].includes(c.team) ? c.team : "",
+        kind: c.id === "裁判" ? "ref" : "player",
+        number: m ? m[2] : "", name: "", confirmed: false,
+        tracks: c.tracks.map(t => t.id),
+      };
+    }),
+    unassigned: [],
+  };
+}
+
+function change(fn) {
+  history.push(JSON.stringify(state));
+  if (history.length > 200) history.shift();
+  fn();
+  render();
+  scheduleSave();
+}
+function undo() {
+  if (!history.length) return;
+  state = JSON.parse(history.pop());
+  render(); scheduleSave();
+}
+function scheduleSave() {
+  $("#status").textContent = "保存中…";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try {
+      const r = await (await fetch("/api/people", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(state) })).json();
+      $("#status").textContent = `已保存 ${r.saved_at.slice(11)}`;
+    } catch (e) { $("#status").textContent = "保存失败，检查服务是否还在运行"; }
+  }, 500);
+}
+
+const seconds = p => p.tracks.reduce((s, id) => s + (tracks[id]?.seconds || 0), 0);
+const label = p => p.kind !== "player" ? KINDS[p.kind] : `${p.team ? state.teams[p.team].name : "?"} ${p.number ? "#" + p.number : "?"}${p.name ? " " + p.name : ""}`;
+function ocrOf(p) {
+  const n = {};
+  for (const id of p.tracks) { const t = tracks[id]; if (t?.number) n[t.number] = (n[t.number] || 0) + t.readings; }
+  return Object.entries(n).sort((a, b) => b[1] - a[1]).slice(0, 4);
+}
+function duplicates(p) {
+  if (p.kind !== "player" || !p.team || !p.number) return [];
+  return state.people.filter(q => q !== p && q.kind === "player" && q.team === p.team && q.number === p.number);
+}
+
+function render() {
+  const y = window.scrollY;
+  renderHeader();
+  const main = $("#main"); main.replaceChildren();
+  const visible = state.people
+    .filter(p => p.tracks.length)
+    .filter(p => filter === "all" || (filter === "todo" ? !p.confirmed : filter === "other" ? p.kind !== "player" : p.team === filter && p.kind === "player"))
+    .sort((a, b) => seconds(b) - seconds(a));
+  for (const p of visible) main.append(renderCard(p));
+  main.append(newZone());
+  if (state.unassigned.length) main.append(renderPool());
+  window.scrollTo(0, y);
+}
+
+function renderHeader() {
+  const people = state.people.filter(p => p.tracks.length);
+  const done = people.filter(p => p.confirmed).length;
+  $("#bar").style.width = `${people.length ? 100 * done / people.length : 0}%`;
+  $("#progressText").textContent = `已确认 ${done} / ${people.length}`;
+  const filters = { todo: "未确认", all: "全部", A: state.teams.A.name, B: state.teams.B.name, other: "非球员" };
+  $("#filters").replaceChildren(...Object.entries(filters).map(([k, v]) =>
+    h("button", { class: filter === k ? "on" : "", onclick: () => { filter = k; render(); } }, v)));
+  const roster = $("#roster"); roster.replaceChildren();
+  for (const team of ["A", "B"]) {
+    const players = people.filter(p => p.kind === "player" && p.team === team && p.number)
+      .sort((a, b) => Number(a.number) - Number(b.number));
+    const name = h("input", { class: "teamname", value: state.teams[team].name, title: "点击改队名" });
+    name.addEventListener("change", () => change(() => state.teams[team].name = name.value.trim() || team));
+    roster.append(h("div", { class: "team" }, name,
+      players.map(p => h("span", { class: "chip" + (p.confirmed ? " ok" : ""), onclick: () => jump(p) }, `#${p.number}${p.name ? " " + p.name : ""}`)),
+      players.length ? null : h("span", { class: "meta" }, "（还没有）")));
+  }
+}
+
+function jump(p) {
+  if (filter !== "all") { filter = "all"; render(); }
+  document.getElementById("card-" + p.id)?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function renderCard(p) {
+  const card = h("section", { class: "card" + (p.confirmed ? " confirmed" : ""), id: "card-" + p.id });
+  dropTarget(card, data => {
+    if (data.track != null) change(() => moveTrack(data.track, p));
+    else if (data.person && data.person !== p.id) change(() => merge(data.person, p));
+  });
+  const handle = h("span", { class: "handle", draggable: "true", title: "拖到另一张卡片上合并" }, "⠿");
+  handle.addEventListener("dragstart", e => e.dataTransfer.setData("text/plain", JSON.stringify({ person: p.id })));
+
+  const teamSeg = h("span", { class: "seg" }, ["A", "B", ""].map(t =>
+    h("button", { class: p.team === t ? "on" : "", onclick: () => change(() => p.team = t) }, t ? state.teams[t].name : "无")));
+  const kind = h("select", { onchange: e => change(() => p.kind = e.target.value) },
+    Object.entries(KINDS).map(([k, v]) => h("option", { value: k, selected: p.kind === k }, v)));
+  const num = h("input", { class: "num", placeholder: "号码", value: p.number, inputmode: "numeric" });
+  num.addEventListener("change", () => change(() => p.number = num.value.replace(/\D/g, "")));
+  const name = h("input", { class: "name", placeholder: "名字（可选）", value: p.name });
+  name.addEventListener("change", () => change(() => {
+    const v = name.value.trim();
+    // 号码还空着、名字栏只填了数字：多半是把号码填错了格子
+    if (p.kind === "player" && !p.number && /^\d{1,2}$/.test(v)) p.number = v; else p.name = v;
+  }));
+  const ocr = ocrOf(p);
+  const dups = duplicates(p);
+
+  card.append(h("div", { class: "head" },
+    handle,
+    h("span", { class: "title" }, label(p)),
+    h("span", { class: "meta" }, `${Math.round(seconds(p))} 秒 · ${p.tracks.length} 段 · 原 ${p.origin}`),
+    ocr.length ? h("span", { class: "ocr" }, "号码读数：", ocr.map(([n, c]) => [h("b", {}, n), `×${c} `])) : h("span", { class: "ocr" }, "号码没读到"),
+    teamSeg, kind, p.kind === "player" ? num : null, name,
+    h("button", { class: "confirm", onclick: () => change(() => p.confirmed = !p.confirmed) }, p.confirmed ? "✓ 已确认" : "确认"),
+    dups.length ? h("span", { class: "warn" }, `和 ${dups.map(label).join("、")} 号码相同，是同一个人吗？`,
+      dups.map(q => h("button", { onclick: () => change(() => merge(q.id, p)) }, "合并"))) : null,
+  ));
+  const list = p.tracks.map(id => tracks[id]).filter(Boolean).sort((a, b) => b.seconds - a.seconds);
+  const show = expanded.has(p.id) ? list : list.slice(0, 12);
+  card.append(h("div", { class: "tracks" }, show.map(t => renderTrack(t, p)),
+    list.length > show.length ? h("button", { class: "more", onclick: () => { expanded.add(p.id); render(); } }, `显示全部 ${list.length} 段`) : null));
+  return card;
+}
+
+function renderTrack(t, owner) {
+  const el = h("div", { class: "track" + (t.seconds < 1 ? " small" : ""), draggable: "true", title: `${fmt(t.start)}–${fmt(t.end)}` });
+  el.addEventListener("dragstart", e => e.dataTransfer.setData("text/plain", JSON.stringify({ track: t.id })));
+  el.append(h("div", { class: "imgs" }, t.crops.map(c => {
+    const img = h("img", { src: "/files/" + c.tile, loading: "lazy" });
+    img.addEventListener("mouseenter", () => showPreview(c));
+    img.addEventListener("mouseleave", hidePreview);
+    return img;
+  })));
+  el.append(h("div", { class: "cap" }, `${fmt(t.start)} · ${t.seconds}s${t.number ? " · 读到 " + t.number : ""}`));
+  if (owner) el.append(h("button", { class: "x", title: "不是这个人：移到未归类", onclick: e => { e.stopPropagation(); change(() => moveTrack(t.id, null)); } }, "×"));
+  return el;
+}
+
+function renderPool() {
+  const pool = h("section", { class: "card pool" },
+    h("div", { class: "head" }, h("span", { class: "title" }, "未归类"), h("span", { class: "meta" }, `${state.unassigned.length} 段：拖到正确的卡片上，或拖到上面的“新的人”`)));
+  const list = state.unassigned.map(id => tracks[id]).filter(Boolean).sort((a, b) => b.seconds - a.seconds);
+  pool.append(h("div", { class: "tracks" }, list.map(t => renderTrack(t, null))));
+  dropTarget(pool, data => { if (data.track != null) change(() => moveTrack(data.track, null)); });
+  return pool;
+}
+
+function newZone() {
+  const zone = h("div", { class: "newzone" }, "＋ 新的人：把截图拖到这里，单独建一张卡片");
+  dropTarget(zone, data => {
+    if (data.track == null) return;
+    change(() => {
+      const id = "new" + Date.now();
+      state.people.push({ id, origin: "新建", team: "", kind: "player", number: "", name: "", confirmed: false, tracks: [] });
+      moveTrack(data.track, state.people.at(-1));
+    });
+  });
+  return zone;
+}
+
+function dropTarget(el, onDrop) {
+  el.addEventListener("dragover", e => { e.preventDefault(); el.classList.add("dragover"); });
+  el.addEventListener("dragleave", e => { if (!el.contains(e.relatedTarget)) el.classList.remove("dragover"); });
+  el.addEventListener("drop", e => {
+    e.preventDefault(); e.stopPropagation(); el.classList.remove("dragover");
+    try { onDrop(JSON.parse(e.dataTransfer.getData("text/plain"))); } catch (_) {}
+  });
+}
+
+function moveTrack(id, target) {
+  for (const p of state.people) p.tracks = p.tracks.filter(t => t !== id);
+  state.unassigned = state.unassigned.filter(t => t !== id);
+  if (target) { target.tracks.push(id); target.confirmed = false; } else state.unassigned.push(id);
+}
+
+function merge(fromId, into) {
+  const from = state.people.find(p => p.id === fromId);
+  if (!from || from === into) return;
+  into.tracks.push(...from.tracks);
+  for (const k of ["team", "number", "name"]) if (!into[k] && from[k]) into[k] = from[k];
+  into.confirmed = false;
+  state.people = state.people.filter(p => p !== from);
+}
+
+const preview = $("#preview");
+function showPreview(c) {
+  preview.querySelector("img").src = "/files/" + c.context;
+  preview.querySelector("div").textContent = `${fmt(c.time)}（周围画面）`;
+  preview.style.display = "block";
+}
+function hidePreview() { preview.style.display = "none"; }
+
+$("#undo").addEventListener("click", undo);
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "z" && !["INPUT", "SELECT"].includes(document.activeElement.tagName)) { e.preventDefault(); undo(); }
+});
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,292 @@
+# Basketball Highlight Editor
+
+> 打完球，最不想做的事，往往是回家后再花几个小时剪视频。
+>
+> Basketball Highlight Editor 会先帮你把整场比赛里可能的进球片段找出来，你只需要快速看一遍、删掉误检，再导出自己的集锦。
+
+[English](README.en.md) · **简体中文**
+
+[![Python Tests](https://img.shields.io/github/actions/workflow/status/fly7632785/basketball-highlight-editor/python-tests.yml?branch=main&style=flat-square&label=Python%20tests)](https://github.com/fly7632785/basketball-highlight-editor/actions/workflows/python-tests.yml)
+[![Flutter Checks](https://img.shields.io/github/actions/workflow/status/fly7632785/basketball-highlight-editor/flutter-check.yml?branch=main&style=flat-square&label=Flutter%20checks)](https://github.com/fly7632785/basketball-highlight-editor/actions/workflows/flutter-check.yml)
+[![Latest tag](https://img.shields.io/github/v/tag/fly7632785/basketball-highlight-editor?include_prereleases&style=flat-square&label=latest%20tag)](https://github.com/fly7632785/basketball-highlight-editor/tags)
+[![License](https://img.shields.io/github/license/fly7632785/basketball-highlight-editor?style=flat-square)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Android%20%7C%20iOS-4c6ef5?style=flat-square)
+![Local first](https://img.shields.io/badge/运行方式-完全本地-2ea44f?style=flat-square)
+![Free](https://img.shields.io/badge/费用-免费-f97316?style=flat-square)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](CONTRIBUTING.md)
+[![Linux DO](https://img.shields.io/badge/Linux%20DO-社区交流-00a67d?style=flat-square)](https://linux.do/)
+
+**完全本地运行 · 免费使用 · 自动找片段 · 人工可控**
+
+[🏠 官网 bhe.jafir.top](https://bhe.jafir.top) · [⬇ 下载最新版](https://bhe.jafir.top/#download) · [开始使用](#开始使用) · [功能介绍](#它能帮你省下什么) · [交流群](#用户交流群) · [文档](#文档)
+
+## 先说它解决什么问题
+
+如果你拍过整场篮球比赛，应该遇到过这些情况：
+
+- 比赛打了几十分钟，真正想留的进球可能只有十几个；
+- 回家后需要反复拖进度条，找球、看回放、记时间点；
+- 剪一个视频不难，但剪完整场很磨人，眼睛和耐心都消耗在来回找片段上；
+- 全自动剪辑看起来省事，实际经常把误检也剪进去，最后还是得重新检查；
+- 比赛视频通常比较大，不想为了剪一场球上传到云端，更不想被订阅和按分钟收费绑住。
+
+这个项目的做法比较直接：**让机器负责找，让你负责决定。**
+
+## 它能帮你省下什么
+
+### 省时间
+
+不用从头到尾盯着进度条找进球。Engine 会扫描视频，先给出一批疑似进球候选。你从“找素材”变成“看候选”，通常会轻松很多。
+
+### 省力气
+
+候选片段默认保留。大多数时候，你只需要排除误检，必要时调整片段前后几秒，不用每个候选都点一次确认。
+
+### 不用上传视频
+
+分析、预览、审核和导出默认在自己的电脑上完成。不需要账号，也不依赖在线接口；比赛视频可以留在本地。
+
+### 不花订阅费
+
+项目提供免费、本地部署的使用方式，不按视频时长或导出次数收费。需要准备的是自己的电脑、运行环境和有权使用的模型/素材。
+
+### 结果仍然由你把关
+
+它不是“按一下就替你决定一切”的黑盒。候选可以保留、排除、改时间、加备注、标记球员，也可以手动补上漏掉的片段。最后导出的内容由你决定。
+
+## 功能介绍
+
+- **自动扫描疑似进球**：针对固定机位、单篮筐比赛视频生成候选片段；
+- **自动建议检测区域**：失败时可以手动框选和调整 ROI（感兴趣区域）；
+- **快速模式 / 标准模式**：想先快速看结果就用快速模式，重要比赛可以用标准模式做更完整分析；
+- **候选审核工作台**：视频区域优先，边播放边切换候选；
+- **候选默认保留**：只需要排除误检，不用逐条确认；
+- **时间范围调整**：把进球前后的铺垫和落地过程留得更合适；
+- **手动补漏**：自动检测没找到的片段，可以从原视频当前时间直接加入；
+- **按标签整理集锦**：标签不只可以标记球员，也可以标记三分、扣篮、犯规、精彩防守等场景；标签名称由你自己定义，支持批量标记和按标签导出；
+- **一场比赛多段视频**：同一场比赛分成几段录的，可以放进一个项目，按录制时间排好顺序后排队逐段分析，审核和导出都在一起完成；
+- **两种导出方式**：合并成一条集锦，或为每个候选分别导出；
+- **导出后打开目录**：不用再手动翻文件夹找成片；
+- **任务进度和耗时记录**：知道现在处理到哪一步，也方便比较快速/标准模式的速度。
+
+## 实际使用流程
+
+```text
+导入比赛视频
+    ↓
+设置分析范围和篮筐区域
+    ↓
+选择快速模式或标准模式
+    ↓
+等待自动分析
+    ↓
+在审核工作台快速过一遍候选
+    ↓
+排除误检、调整时间、补漏
+    ↓
+合并导出或分别导出
+```
+
+候选是“疑似事件”，不是模型盖章的最终答案。固定机位、篮筐清晰、画面稳定时，通常更适合当前版本；机位变化很大、篮筐被遮挡或一段视频里有多个篮筐时，建议认真审核结果。
+
+### 一场比赛里有多人，怎么分别导出？
+
+这也是这个工具比较适合球队和训练赛的地方。分析完成后，你可以在审核工作台给每个进球选择球员：
+
+1. 先创建球员名称，例如“张三”“李四”；
+2. 在候选片段上标记对应球员，也可以批量给多个候选设置同一个标签；
+3. 进入导出页，选择某一位球员，只导出他的进球集锦；
+4. 需要团队集锦时，可以选择多位球员，或直接导出全部保留的候选。
+
+被排除的误检不会进入任何人的集锦。没有标记球员的片段也不会被悄悄丢掉，导出时可以选择是否把“未分配球员”的候选一起带上。
+
+## 界面预览
+
+审核时，视频区域会尽量保持足够大，候选列表放在旁边，方便连续查看：
+
+![审核工作台](capture/screenshot-20260813-150054.png)
+
+下面这段录屏展示了从导入视频、分析候选到审核和导出的完整操作流程：
+
+[![播放操作录屏](capture/录制视频封面.jpg)](https://shengshengniannian.oss-cn-beijing.aliyuncs.com/shengshengniannian/basketball-highlight-editor/recording-demo.mp4)
+
+点击封面即可打开 OSS 上的操作录屏。仓库不保存大体积演示视频，避免下载项目时额外占用 Git 空间。
+
+下面是一个适合快速了解操作流程的短版演示：
+
+https://github.com/user-attachments/assets/43bfed76-bbc6-42c2-bbaa-ea2bf0604292
+
+排除的候选不会被删除，之后仍然可以恢复或复核：
+
+![标签和候选管理](capture/screenshot-20260813-150302.png)
+
+审核完成后，可以按标签筛选片段，再合并成一条集锦，或者分别导出每个片段：
+
+![导出集锦](capture/screenshot-20260813-150335.png)
+
+### 标签不只用来标记球员
+
+一场比赛里有多人时，可以给进球标记对应球员；想整理不同类型的片段，也可以自己创建标签，例如：
+
+- 球员：`张三`、`李四`；
+- 得分：`三分`、`扣篮`、`上篮`；
+- 比赛场景：`犯规`、`精彩防守`、`关键回合`。
+
+同一个片段可以有多个标签。导出时可以只选某位球员、某种场景，或同时选择多个标签，分别制作个人集锦、三分集锦、扣篮集锦和整场集锦。
+
+更多页面、按钮、快捷键和白色主题截图见 [`docs/USER_FLOW_V1.md`](docs/USER_FLOW_V1.md) 以及 [`docs/README.md`](docs/README.md)。
+
+## Android / iOS 移动端
+
+BHE 现在也提供 Android 和 iOS 移动端版本。移动端适合在手机上导入比赛视频、查看项目、审核候选片段，并把保留的片段分别导出或合并导出；Android 当前还接入了本地原生分析路径，iOS 的本地分析能力取决于 Rust Runtime 和 ONNX Runtime 是否完成构建链接。
+
+Android 标准分析和桌面端一样会做篮筐逐帧复核，确认没进的候选默认排除。骁龙 8 至尊版第五代手机使用 NPU 分析，10 分钟视频约 4.5 分钟；其他手机使用 CPU，会明显更慢。
+
+移动端界面保持和桌面端相同的核心流程：先准备项目，再查看视频和候选，最后进入导出页。手机上审核时可以在竖屏查看候选，也可以横屏获得更大的视频画面。
+
+<p align="center">
+  <img src="capture/mobile-ios-project.png" alt="iOS 项目工作台" width="280">
+  <img src="capture/mobile-ios-review.png" alt="iOS 候选审核" width="280">
+</p>
+
+横屏审核会把视频、候选列表和审核操作集中到同一工作区：
+
+<p align="center">
+  <img src="capture/mobile-ios-review-landscape.png" alt="iOS 横屏审核" width="560">
+</p>
+
+审核完成后，可以分别导出所有保留片段，也可以合并成一条集锦：
+
+<p align="center">
+  <img src="capture/mobile-ios-export.png" alt="iOS 导出集锦" width="280">
+</p>
+
+移动端构建、真机测试和原生推理依赖见 [`apps/mobile/README.md`](apps/mobile/README.md)；跨端能力边界见 [`docs/MOBILE_PC_FEATURE_MATRIX.md`](docs/MOBILE_PC_FEATURE_MATRIX.md)。
+
+## 最近更新
+
+项目在持续维护，基本每周都会发新版本。每个版本的完整改动见 [`CHANGELOG.md`](CHANGELOG.md)。
+
+| 版本 | 日期 | 主要更新 |
+|---|---|---|
+| v0.1.11 | 2026-10-23 | 桌面端和安卓可以在 App 里检查更新，下载后校验安装包再安装；反馈入口可一键复制诊断信息，出错时能直接反馈；运行日志记录运行环境、视频参数、各阶段耗时和失败原因；安卓安装包固定签名，以后可以直接覆盖升级；修复多段项目审核页无法播放视频 |
+| v0.1.10 | 2026-10-23 | 桌面端一个项目可以放同一场比赛的多段视频，按录制时间排序、排队逐段分析、合在一起审核和导出；单独导出的片段文件名带球员名；球员名单可以存成分组在其他项目一键导入；桌面端运行日志写入固定目录，可从「关于」打开；修复中文 Windows 分析卡在 1% 和 iPhone 空间音频视频导出失败 |
+| v0.1.9 | 2026-10-22 | Android 在骁龙 8 至尊版第五代上用 NPU 分析，10 分钟视频约 4.5 分钟；Android 加入篮筐逐帧复核和粗扫兜底候选，结果与桌面端对齐；机位中途偏移不再漏掉后半段进球；手机审核支持按复核结果和球员筛选、时间轴范围编辑，首页显示项目封面 |
+| v0.1.8 | 2026-10-21 | 篮筐复核改为只按看到的证据排除，三个已审核视频上漏判从 47 个降到 0 个；审核列表可按复核结果筛选；Windows 生成代理用显卡解码、导出用显卡编码；修复 Windows 非 16:9 视频四周黑边和浅色主题文字看不清 |
+| v0.1.7 | 2026-10-20 | 标准分析新增篮筐逐帧复核，自动排除没进的候选；首页支持拖入视频新建项目并显示项目封面；重做片段范围编辑，数字键快速设置球员标签；修复一批审核和导出的卡顿与状态问题 |
+| v0.1.4 – v0.1.6 | 2026-10-17 | 审核视频铺满面板；修复 Windows 发布包的代理生成和导出，之后 10-18 至 10-20 又发布了多个 Windows 热修复 |
+| v0.1.1 – v0.1.3 | 2026-09-16 – 09-23 | 桌面端和移动端完整中英文界面；修复 Android 原生库加载和 ONNX Runtime 版本 |
+| v0.1.0 | 2026-09-14 | 首个正式预览版：自动构建 macOS、Windows 安装包和 Android 测试包，可从官网下载；移动端完成桌面算法移植 |
+
+## 开始使用
+
+你可以从[官网下载安装包](https://bhe.jafir.top/#download)，GitHub Releases 作为备用下载入口；每次推送 `v*` tag 后，GitHub Actions 会自动生成 macOS Intel、macOS Apple Silicon、Windows x64 和 Android `arm64-v8a` 版本。Android 包为 `debug-signed` 侧载测试包，不是 Google Play 正式签名包。想参与开发或自己构建时，再按下面的源码部署步骤准备环境。
+
+### macOS
+
+需要 Python 3.11、Flutter stable 和 FFmpeg/FFprobe：
+
+```bash
+brew install ffmpeg
+
+git clone https://github.com/fly7632785/basketball-highlight-editor.git
+cd basketball-highlight-editor
+
+python3.11 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements-dev.txt
+
+.venv/bin/python scripts/check_runtime.py \
+  --root . \
+  --python .venv/bin/python
+
+cd apps/desktop
+flutter pub get
+flutter run -d macos
+```
+
+启动后按“新建项目 → 选择视频 → 分析 → 审核 → 导出”操作即可。
+
+### Windows
+
+Windows 可以使用一键搭建脚本：
+
+```powershell
+git clone https://github.com/fly7632785/basketball-highlight-editor.git
+cd basketball-highlight-editor
+powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1
+```
+
+也可以按手动方式安装 Python、Flutter Windows 工具链和 FFmpeg，具体命令见 [`docs/MACOS_PACKAGING_V1.md`](docs/MACOS_PACKAGING_V1.md)。当前 Windows 全流程已经过本地验证，但仍属于持续完善中的平台路径。
+
+### 模型和视频
+
+完整源码包含默认模型：
+
+```text
+models/bball_model.pt
+models/bball_model.onnx
+```
+
+正常 clone 后不需要再从陌生地址下载模型。模型、比赛视频、训练数据和第三方依赖仍然要遵守各自的授权条件；不要把没有公开处理权的素材提交到仓库。
+
+## 快速模式和标准模式
+
+| 模式 | 适合什么时候用 | 取舍 |
+|---|---|---|
+| **快速模式** | 想先快速看一版候选，或者只是找几个大概时间点 | 等得更短，但可能漏掉部分事件 |
+| **标准模式** | 重要比赛、希望尽量完整地找候选 | 分析更慢，但会做更完整的筛选 |
+
+两种模式的审核和导出方式一样。快速模式只是帮你更快得到第一版结果，不会替你做最终选择。
+
+## 技术上怎么工作的
+
+- **Flutter**：桌面端界面和审核工作台；
+- **Python + OpenCV + YOLO**：视频采样、篮球/篮筐检测和候选生成；
+- **SQLite**：保存项目、任务、候选和审核状态；
+- **FFmpeg / FFprobe**：读取视频信息、生成预览和导出片段；
+- **Rust + ONNX Runtime**：移动端本地推理路径。
+
+技术细节、Engine 协议、数据库结构和移动端边界见 [`docs/README.md`](docs/README.md) 和 [`docs/architecture/`](docs/architecture/)。
+
+## 当前范围
+
+目前最适合：
+
+- 固定机位；
+- 单场比赛；
+- 单个篮筐；
+- 需要快速整理校队、业余联赛或训练赛集锦的球员、教练和拍摄者。
+
+暂时不把多机位、多篮筐、实时直播、云端协作和“完全无人审核”当作当前版本能力。项目会优先把本地分析、候选审核和导出这条主路径做好。
+
+## 用户交流群
+
+扫码加作者微信，备注「BHE」拉你进群。新版本会先在群里测，用着有问题可以直接找我，也欢迎提需求。
+
+<img src="website/assets/wechat-qr.png" alt="作者微信二维码" width="180">
+
+## 文档
+
+- [用户流程](docs/USER_FLOW_V1.md)：从导入到导出的操作和异常路径；
+- [产品需求](docs/REQUIREMENTS_V1.md)：当前 V1 范围、已实现能力和剩余工作；
+- [决策记录](docs/DECISIONS_V1.md)：快速/标准模式、审核语义和工程边界；
+- [架构说明](docs/architecture/ARCHITECTURE_V1.md)：模块职责和任务生命周期；
+- [Engine 协议](docs/architecture/ENGINE_PROTOCOL_V1.md)：Flutter 与 Python Engine 的 JSONL 契约；
+- [SQLite 结构](docs/architecture/SQLITE_SCHEMA_V1.sql)：项目数据库结构；
+- [macOS 打包](docs/MACOS_PACKAGING_V1.md)：运行时、构建和分发边界；
+- [审核数据导出](docs/REVIEW_DATASET_EXPORT.md)：导出人工审核数据的用法；
+- [性能基准](docs/research/ANALYSIS_MODE_BENCHMARK_20260812.md)：快速/标准模式实测记录。
+
+## 开源参考
+
+项目在模型、检测流程和产品工作流上参考了 [HoopCut](https://github.com/RuiYang0122/HoopCut)、[basketball-highlights](https://github.com/reborncd/basketball-highlights)、[ShotMarker](https://github.com/zhangrunhao/ShotMarker)、[basketball_clipper](https://github.com/snowroll/basketball_clipper)、[ball-yolo](https://github.com/griftt/ball-yolo)、[ClarkWang1214/basketball-highlights](https://github.com/ClarkWang1214/basketball-highlights) 和 [ai-sports-cut-agent](https://github.com/bond0060/ai-sports-cut-agent)。感谢这些项目公开分享的思路和实践。
+
+## 隐私和授权
+
+视频默认只在本地处理，不上传到云端。源码、模型、训练数据、比赛画面和第三方依赖的授权范围并不相同，发布或分发前请查看 [`docs/research/LICENSE_NOTES.md`](docs/research/LICENSE_NOTES.md) 和 [`docs/research/THIRD_PARTY_MANIFEST.md`](docs/research/THIRD_PARTY_MANIFEST.md)。
+
+如果你用它剪过一场比赛，欢迎反馈：哪些地方真的省时间，哪些误检最烦，哪些操作还不顺手。这个项目最需要的不是漂亮的宣传语，而是这些真实使用反馈。
+
+# 致谢
+感谢 [Linux.do](https://linux.do/) 社区。
